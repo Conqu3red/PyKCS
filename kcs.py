@@ -82,12 +82,13 @@ def decode_file(
                     frame_index += local_index
                     return cycles == cycles_for_bit * 2
         
-        frame_index = max((leader * frequency) - cycle_length, frame_index)
+        frame_index = max((leader * frequency) - (cycle_length * cycles_per_bit), frame_index)
 
         while frame_index < frames:
 
             if bits_done == 0:
-                get_bit(1)
+                for _ in range(start_bits):
+                    get_bit()
 
 
             bit = get_bit()
@@ -101,13 +102,13 @@ def decode_file(
                 b.append(num)
 
                 if parity_mode == ParityMode.ODD:
-                    p = get_bit(1)
+                    p = get_bit()
                     bit_count = bit_count_lookup[num] + p
                     if bit_count % 2 != 1:
                         parity_errors += 1
                 
                 if parity_mode == ParityMode.EVEN:
-                    p = get_bit(1)
+                    p = get_bit()
                     bit_count = bit_count_lookup[num] + p
                     if bit_count % 2 != 0:
                         parity_errors += 1
@@ -117,7 +118,7 @@ def decode_file(
 
                 for _ in range(stop_bits):
                     if frame_index < frames:
-                        get_bit(1)
+                        get_bit()
                     else:
                         print("stop bit clipped??")
     
@@ -146,36 +147,39 @@ def encode_file(
             else:
                 f.writeframesraw(short_cycle)
         
+        def push_bit(value: bool):
+            for _ in range(cycles_per_bit):
+                push_cycle(not value)
+        
         # TODO: leader part
 
-        for _ in range((leader * (frequency // cycle_length)) - 1):
+        for _ in range((leader * (frequency // cycle_length)) - cycles_per_bit):
             push_cycle(False)
 
 
         for byte in data:
             for _ in range(start_bits):
-                push_cycle(True)
+                push_bit(0)
             
             for i in range(8):
                 # little endian
                 bit = (byte >> i) & 1
 
-                for _ in range(cycles_per_bit):
-                    push_cycle(not bit)
+                push_bit(bit)
             
             if parity_mode == ParityMode.ODD:
                 bit_count = bit_count_lookup[byte]
-                push_cycle(bit_count % 2 == 1)
+                push_bit(bit_count % 2 == 0)
             
             if parity_mode == ParityMode.EVEN:
                 bit_count = bit_count_lookup[byte]
-                push_cycle(bit_count % 2 == 0)
+                push_bit(bit_count % 2 == 1)
 
             for _ in range(stop_bits):
-                push_cycle(False)
+                push_bit(1)
         
         # end leader
-        for _ in range((leader * (frequency // cycle_length)) - 1):
+        for _ in range((leader * (frequency // cycle_length)) - cycles_per_bit):
             push_cycle(False)
 
 def main():
@@ -195,6 +199,8 @@ def main():
     parser.add_argument("-O", action="store_const", const=ParityMode.ODD, default=ParityMode.NONE, dest="parity_mode", help="Odd Parity")
     parser.add_argument("-E", action="store_const", const=ParityMode.EVEN, default=ParityMode.NONE, dest="parity_mode", help="Even Parity")
     
+    parser.add_argument("-S", action="store_const", const=1, default=2, dest="stop_bits", help="1 Stop Bit")
+
     parser.add_argument("infile", type=str)
     parser.add_argument("outfile", nargs="?", type=str)
 
