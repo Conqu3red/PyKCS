@@ -27,7 +27,7 @@ def decode_file(
 
     # TODO: read in all frames to a buffer
 
-    cycles_per_bit = 1200 / baud
+    cycles_per_bit = 1200 // baud
 
     frequency = 22050 # hz
 
@@ -52,17 +52,21 @@ def decode_file(
         bits_done = 0
         num = 0
 
-        def get_bit(bit_length = bit_length_frames) -> bool:
+        def get_bit(cycles_for_bit = cycles_per_bit) -> bool:
             nonlocal frame_index
             
+            bit_length = cycles_for_bit * cycle_length
+
             cycles = 0
             top = False
+
+            local_index = 0
 
             #print("######")
             
             while frame_index < frames:
-                x = frame_buffer[frame_index]
-                frame_index += 1
+                x = frame_buffer[frame_index + local_index]
+                local_index += 1
 
                 #print(x)
                 
@@ -74,15 +78,16 @@ def decode_file(
                     top = False
                 
                 
-                if frame_index % bit_length == 0 and frame_index > 0: # subtract one because tell is one ahead of val we just read
-                    return cycles == cycles_per_bit * 2
+                if local_index == bit_length:
+                    frame_index += local_index
+                    return cycles == cycles_for_bit * 2
         
-        frame_index = (leader * frequency) - cycle_length
+        frame_index = max((leader * frequency) - cycle_length, frame_index)
 
         while frame_index < frames:
 
             if bits_done == 0:
-                get_bit(cycle_length)
+                get_bit(1)
 
 
             bit = get_bit()
@@ -96,13 +101,13 @@ def decode_file(
                 b.append(num)
 
                 if parity_mode == ParityMode.ODD:
-                    p = get_bit(cycle_length)
+                    p = get_bit(1)
                     bit_count = bit_count_lookup[num] + p
                     if bit_count % 2 != 1:
                         parity_errors += 1
                 
                 if parity_mode == ParityMode.EVEN:
-                    p = get_bit(cycle_length)
+                    p = get_bit(1)
                     bit_count = bit_count_lookup[num] + p
                     if bit_count % 2 != 0:
                         parity_errors += 1
@@ -112,7 +117,7 @@ def decode_file(
 
                 for _ in range(stop_bits):
                     if frame_index < frames:
-                        get_bit(cycle_length)
+                        get_bit(1)
                     else:
                         print("stop bit clipped??")
     
@@ -129,9 +134,7 @@ def encode_file(
     frequency = 22050 # hz
 
     with wave.open(filename, "wb") as f:
-        frames = (2 * leader * frequency) + (cycles_per_bit * cycle_length) * (len(data) * (start_bits + 8 + stop_bits))
-        f.setnframes(frames)
-        # compute number of frames needed
+        parity_bits = parity_mode != ParityMode.NONE
 
         f.setnchannels(1)
         f.setsampwidth(1)
@@ -145,7 +148,7 @@ def encode_file(
         
         # TODO: leader part
 
-        for _ in range(leader * (frequency // cycle_length) - 1):
+        for _ in range((leader * (frequency // cycle_length)) - 1):
             push_cycle(False)
 
 
@@ -157,7 +160,7 @@ def encode_file(
                 # little endian
                 bit = (byte >> i) & 1
 
-                for i in range(cycles_per_bit):
+                for _ in range(cycles_per_bit):
                     push_cycle(not bit)
             
             if parity_mode == ParityMode.ODD:
@@ -170,6 +173,10 @@ def encode_file(
 
             for _ in range(stop_bits):
                 push_cycle(False)
+        
+        # end leader
+        for _ in range((leader * (frequency // cycle_length)) - 1):
+            push_cycle(False)
 
 def main():
     import argparse
@@ -235,4 +242,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
