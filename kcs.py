@@ -101,7 +101,7 @@ def decode_file(
             bits_done += 1
             cycles = 0
 
-            if bits_done == 8:
+            if bits_done == data_bits:
                 b.append(num)
 
                 if parity_mode == ParityMode.ODD:
@@ -163,7 +163,7 @@ def encode_file(
             for _ in range(start_bits):
                 push_bit(0)
             
-            for i in range(8):
+            for i in range(data_bits):
                 # little endian
                 bit = (byte >> i) & 1
 
@@ -203,6 +203,8 @@ def main():
     
     parser.add_argument("-S", action="store_const", const=1, default=2, dest="stop_bits", help="1 Stop Bit")
 
+    parser.add_argument("-D", action="store_const", const=7, default=8, dest="data_bits", help="7 Data Bits")
+
     parser.add_argument("infile", type=str)
     parser.add_argument("outfile", nargs="?", type=str)
 
@@ -223,6 +225,9 @@ def main():
     print("INFILE: ", args.infile)
     
     if args.Make_Wavefile:
+        if args.data_bits == 7:
+            print("WARNING: The most significant bit in each byte will be lost!\n\t11111111 -> 01111111")
+        
         start = time.perf_counter()
         with open(args.infile, "rb") as f:
             print("OUTFILE: ", args.outfile)
