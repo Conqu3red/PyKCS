@@ -25,8 +25,6 @@ def decode_file(
     start_bits = 1, parity_mode: ParityMode = ParityMode.NONE, leader = 0
 ):
 
-    # TODO: read in all frames to a buffer
-
     cycles_per_bit = 1200 // baud
 
     frequency = 22050 # hz
@@ -40,12 +38,9 @@ def decode_file(
 
         frame_index = 0
         
-        frames = f.getnframes() - (leader * frequency) # leader is at the end as well
-
-        if leader:
-            frames += cycle_length
+        frames = f.getnframes() # leader is at the end as well
         
-        bit_length_frames = cycles_per_bit * cycle_length
+        bit_frame_length = cycles_per_bit * cycle_length
 
         sample_width = f.getsampwidth()
 
@@ -64,7 +59,7 @@ def decode_file(
 
             #print("######")
             
-            while frame_index < frames:
+            while frame_index + local_index < frames:
                 x = frame_buffer[frame_index + local_index]
                 local_index += 1
 
@@ -82,7 +77,15 @@ def decode_file(
                     frame_index += local_index
                     return cycles == cycles_for_bit * 2
         
-        frame_index = max((leader * frequency) - (cycle_length * cycles_per_bit), frame_index)
+        # keep reading until we reach the initial start bit, then step back
+        while True:
+            bit = get_bit(1)
+            if bit == 0:
+                frame_index -= cycle_length
+                break
+            else:
+                frames -= cycle_length
+        
 
         while frame_index < frames:
 
@@ -151,7 +154,6 @@ def encode_file(
             for _ in range(cycles_per_bit):
                 push_cycle(not value)
         
-        # TODO: leader part
 
         for _ in range((leader * (frequency // cycle_length)) - cycles_per_bit):
             push_cycle(False)
