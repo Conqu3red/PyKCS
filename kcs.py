@@ -54,28 +54,28 @@ def decode_file(
 
             cycles = 0
             top = False
+            top_val = (256 ** sample_width) - 1
 
             local_index = 0
 
             #print("######")
             
-            while frame_index + local_index < frames:
+            while local_index < bit_length:
                 x = frame_buffer[frame_index + local_index]
                 local_index += 1
 
                 #print(x)
                 
-                if x == (256 ** sample_width) - 1: # top of cycle
-                    top = True
+                if x == top_val: # top of cycle
+                    top = x == top_val
                 
-                if x == 0 and top:
+                if not x and top:
                     cycles += 1
                     top = False
                 
                 
-                if local_index == bit_length:
-                    frame_index += local_index
-                    return cycles == cycles_for_bit * 2
+            frame_index += local_index
+            return cycles == cycles_for_bit * 2
         
         # keep reading until we reach the initial start bit, then step back
         while True:
