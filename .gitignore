@@ -3,3 +3,4 @@ kcs08
 __pycache__
 *.exe
 *.txt
+.vscode

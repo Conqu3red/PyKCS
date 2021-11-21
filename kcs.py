@@ -67,7 +67,7 @@ def decode_file(
                 #print(x)
                 
                 if x == top_val: # top of cycle
-                    top = x == top_val
+                    top = True
                 
                 if not x and top:
                     cycles += 1
@@ -99,7 +99,6 @@ def decode_file(
             num += bit << bits_done
             
             bits_done += 1
-            cycles = 0
 
             if bits_done == data_bits:
                 b.append(num)
