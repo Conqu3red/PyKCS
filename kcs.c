@@ -6,7 +6,6 @@
 #include <string.h>
 
 typedef struct {
-    char chunkID[4];
     uint32_t chunkSize;
     uint16_t audioFormat;
     uint16_t numChannels;
@@ -16,48 +15,116 @@ typedef struct {
     uint16_t bitsPerSample;
 } FmtChunk;
 
-typedef struct {
-    char chunkID[4];
-    uint32_t chunkSize;
+struct {
+    size_t size;
     uint8_t *data;
-} DataChunk;
+} typedef ByteBuffer; // equivilent to a data chunk
 
 typedef struct {
-    char chunkID[4];
     uint32_t chunkSize;
-    char format[4];
     FmtChunk fmt;
-    DataChunk data; // TODO: multiple data chunks
+    size_t dataChunkCount;
+    ByteBuffer *dataChunks; // TODO: multiple data chunks
 } WavFile;
 
 #define READ_VAL(v) nread = fread(&v, sizeof v, 1, file)
 
-WavFile loadWavFile(FILE *file) {
-    WavFile wavFile;
+size_t fbytesleft(FILE *fp) {
+    size_t cur = ftell(fp);
+    fseek(fp, 0L, SEEK_END);
+    size_t end = ftell(fp);
+    fseek(fp, cur, SEEK_SET);
+    return end - cur;
+}
+
+WavFile *wavLoadFile(FILE *file) {
+    WavFile *wavFile = malloc(sizeof(WavFile));
+
+    char chunkID[4];
     size_t nread;
 
     // header info
-    READ_VAL(wavFile.chunkID);
-    READ_VAL(wavFile.chunkSize);
-    READ_VAL(wavFile.format);
+    READ_VAL(chunkID);
+    READ_VAL(wavFile->chunkSize);
+    READ_VAL(chunkID); // format
 
     // fmt chunk
-    READ_VAL(wavFile.fmt.chunkID);
-    READ_VAL(wavFile.fmt.chunkSize);
-    READ_VAL(wavFile.fmt.audioFormat);
-    READ_VAL(wavFile.fmt.numChannels);
-    READ_VAL(wavFile.fmt.sampleRate);
-    READ_VAL(wavFile.fmt.byteRate);
-    READ_VAL(wavFile.fmt.blockAlign);
-    READ_VAL(wavFile.fmt.bitsPerSample);
+    READ_VAL(chunkID);
+    READ_VAL(wavFile->fmt.chunkSize);
+    READ_VAL(wavFile->fmt.audioFormat);
+    READ_VAL(wavFile->fmt.numChannels);
+    READ_VAL(wavFile->fmt.sampleRate);
+    READ_VAL(wavFile->fmt.byteRate);
+    READ_VAL(wavFile->fmt.blockAlign);
+    READ_VAL(wavFile->fmt.bitsPerSample);
+
+    wavFile->dataChunks = malloc(sizeof(ByteBuffer));
+    wavFile->dataChunkCount = 1;
+
 
     // data chunk
-    READ_VAL(wavFile.data.chunkID);
-    READ_VAL(wavFile.data.chunkSize);
-    wavFile.data.data = malloc(wavFile.data.chunkSize);
-    nread = fread(wavFile.data.data, sizeof(uint8_t), wavFile.data.chunkSize, file);
+    for (size_t i = 0; fbytesleft(file); i++) {
+        if ((i + 1) > wavFile->dataChunkCount) {
+            wavFile->dataChunkCount = i + 1;
+            wavFile->dataChunks = realloc(wavFile->dataChunks, sizeof(ByteBuffer) * wavFile->dataChunkCount);
+        }
+        READ_VAL(chunkID);
+        ByteBuffer *chunk = wavFile->dataChunks + i;
+        uint32_t size = 0;
+        READ_VAL(size);
+        chunk->size = size;
+        wavFile->dataChunks[i].data = NULL;
+
+        size_t bytes_left = fbytesleft(file);
+        if (chunk->size > bytes_left) {
+            printf("Wav Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", chunk->size, bytes_left);
+        }
+
+        chunk->data = malloc(chunk->size); // TODO: sanity checks
+        nread = fread(chunk->data, sizeof(uint8_t), chunk->size, file);
+    }
+    //READ_VAL(wavFile.data.chunkID);
+    //READ_VAL(wavFile.data.chunkSize);
+    //wavFile.data.data = malloc(wavFile.data.chunkSize);
+    //nread = fread(wavFile.data.data, sizeof(uint8_t), wavFile.data.chunkSize, file);
 
     return wavFile;
+}
+
+uint8_t wavGetFrame(WavFile *wavFile, uint64_t index) {
+    // BUG: no support for multi-byte resolutions / multiple channels
+    uint64_t chunkIndex = 0;
+    while (chunkIndex < wavFile->dataChunkCount) {
+        if (index < wavFile->dataChunks[chunkIndex].size) {
+            return wavFile->dataChunks[chunkIndex].data[index];
+        }
+        else {
+            index -= wavFile->dataChunks[chunkIndex].size;
+            chunkIndex += 1;
+        }
+    }
+
+    printf("Error: Index exceeded end of Wav File data.\n");
+    return 0;
+}
+
+uint64_t wavGetNumFrames(WavFile *wavFile) {
+    // TODO: better solution, maybe like a FILE* ?
+    uint64_t c = 0;
+    for (size_t i = 0; i < wavFile->dataChunkCount; i++) {
+        c += wavFile->dataChunks[i].size / (wavFile->fmt.bitsPerSample / 8);
+    }
+
+    return c;
+}
+
+void wavFree(WavFile *wavFile) {
+    // loop through data chunks and free them
+    for (size_t i = 0; i < wavFile->dataChunkCount; i++) {
+        free(wavFile->dataChunks[i].data);
+        free(wavFile->dataChunks + i);
+    }
+    free(wavFile);
 }
 
 enum {
@@ -88,7 +155,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex) {
     uint64_t local_index = 0;
 
     while (local_index < bit_length) {
-        uint8_t x = wavFile->data.data[(*frameIndex) + local_index];
+        uint8_t x = wavGetFrame(wavFile, (*frameIndex) + local_index);
         local_index += 1;
 
         if (x == top_val) top = true;
@@ -104,17 +171,12 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex) {
 }
 
 struct {
-    size_t size;
-    uint8_t *data;
-} typedef ByteBuffer;
-
-struct {
     uint64_t parity_errors;
     ByteBuffer data;
 } typedef DecodedKCS;
 
 DecodedKCS decode_kcs(
-    WavFile wavFile, uint32_t baud, uint8_t data_bits, uint8_t stop_bits,
+    WavFile *wavFile, uint32_t baud, uint8_t data_bits, uint8_t stop_bits,
     uint8_t start_bits, ParityMode parity_mode, uint16_t leader
 ) {
     uint16_t cycles_per_bit = 1200 / baud;
@@ -129,15 +191,15 @@ DecodedKCS decode_kcs(
     uint8_t bits_done;
     uint8_t num;
 
-    uint64_t frames = wavFile.data.chunkSize;
+    uint64_t frames = wavGetNumFrames(wavFile);
     uint64_t frameIndex = 0;
 
-    if (wavFile.fmt.sampleRate != 22050) {
+    if (wavFile->fmt.sampleRate != 22050) {
         
     }
     else {
         while (true) {
-            bool bit = get_bit(&wavFile, 1, &frameIndex);
+            bool bit = get_bit(wavFile, 1, &frameIndex);
             if (!bit) {
                 frameIndex -= cycleLength;
                 break;
@@ -150,11 +212,11 @@ DecodedKCS decode_kcs(
         while (frameIndex < frames) {
             if (bits_done == 0) {
                 for (uint16_t i = 0; i < start_bits; i++) {
-                    get_bit(&wavFile, cycles_per_bit, &frameIndex);
+                    get_bit(wavFile, cycles_per_bit, &frameIndex);
                 }
             }
 
-            bool bit = get_bit(&wavFile, cycles_per_bit, &frameIndex);
+            bool bit = get_bit(wavFile, cycles_per_bit, &frameIndex);
             num += bit << bits_done;
 
             bits_done += 1;
@@ -171,14 +233,14 @@ DecodedKCS decode_kcs(
 
                 // parity checks
                 if (parity_mode == PARITY_ODD) {
-                    bool p = get_bit(&wavFile, cycles_per_bit, &frameIndex);
+                    bool p = get_bit(wavFile, cycles_per_bit, &frameIndex);
                     uint8_t bit_count = count_bits(num) + p;
                     if (bit_count % 2 != 1)
                         parity_errors += 1;
                 }
 
                 if (parity_mode == PARITY_EVEN) {
-                    bool p = get_bit(&wavFile, cycles_per_bit, &frameIndex);
+                    bool p = get_bit(wavFile, cycles_per_bit, &frameIndex);
                     uint8_t bit_count = count_bits(num) + p;
                     if (bit_count % 2 != 0)
                         parity_errors += 1;
@@ -188,7 +250,7 @@ DecodedKCS decode_kcs(
                 bits_done = 0;
 
                 for (uint8_t i = 0; i < stop_bits; i++) {
-                    get_bit(&wavFile, cycles_per_bit, &frameIndex);
+                    get_bit(wavFile, cycles_per_bit, &frameIndex);
                 }
             }
         }
@@ -295,7 +357,7 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
             return EXIT_FAILURE;
         }
 
-        WavFile wavFile = loadWavFile(file);
+        WavFile *wavFile = wavLoadFile(file);
 
         //printf("format: %.4s, %.4s\n", wavFile.chunkID, wavFile.format);
         //printf("ChunkSize: %d\n", wavFile.chunkSize);
@@ -326,7 +388,7 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
         printf("\ndone\n");
 
         free(buf.data);
-        free(wavFile.data.data);
+        wavFree(wavFile);
     }
 
     return EXIT_SUCCESS;
