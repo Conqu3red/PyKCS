@@ -72,7 +72,7 @@ WavFile *wavLoadFile(FILE *file) {
         ByteBuffer *chunk = wavFile->dataChunks + i;
         uint32_t size = 0;
         READ_VAL(size);
-        chunk->size = size;
+        chunk->size = (size_t)size;
         wavFile->dataChunks[i].data = NULL;
 
         size_t bytes_left = fbytesleft(file);
