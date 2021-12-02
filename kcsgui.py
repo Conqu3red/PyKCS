@@ -63,8 +63,8 @@ class App:
         if databits7.get():
             command.append("-D")
 
-        command.append(inputdialog)
-        command.append(outputdialog)
+        command.append("\"" + inputdialog + "\"")
+        command.append("\"" + outputdialog + "\"")
 
         if makewavefile:
             command.append("-M")
