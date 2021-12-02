@@ -1,7 +1,6 @@
 # CKCS makefile.
 CC=gcc
-BFLAGS= -Wall -g 
-CFLAGS= -O3
+FLAGS= -O3 -g
 
 TARGET=ckcs.exe
 SRC=kcs.c
@@ -10,5 +9,5 @@ SRC=kcs.c
 .DEFAULT_GOAL := default
 
 default: $(SRC)
-	$(CC) $(BFLAGS) $(SRC) -o $(TARGET) $(CFLAGS)
+	$(CC) $(FLAGS) $(SRC) -o $(TARGET) 
 	@echo $(TARGET) Succesfully installed.
