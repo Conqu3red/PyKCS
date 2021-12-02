@@ -1,6 +1,6 @@
 # CKCS makefile.
 CC=gcc
-BFLAGS= -v -Wall -g 
+BFLAGS= -Wall -g 
 CFLAGS= -O3
 
 TARGET=ckcs.exe
