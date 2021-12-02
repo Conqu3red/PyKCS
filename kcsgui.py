@@ -28,7 +28,6 @@ class App:
                                 python = False
                             break
                         else:
-                            config.close()
                             break
             print("Execute with Python = " + str(python))
             config.close()
