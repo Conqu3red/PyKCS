@@ -30,18 +30,21 @@ class App:
                         else:
                             break
             print("Execute with Python = " + str(python))
-            config.close()
         except IOError as error:
             print(error)
             print("Warning: Reverting to defaults: Execute with Python = " + str(python))
 
         try:
-            inputdialog
             outputdialog
         except NameError:
-            showerror("File(s) not selected", "The input/output file(s) has not been selected/does not exist.")
+            showerror("File not selected", "The output file has not been selected/does not exist.")
             quit()
 
+        try:
+            inputdialog
+        except NameError:
+            showerror("File not selected", "The input file has not been selected/does not exist.")
+            quit()
 
         command = []
 
@@ -63,11 +66,11 @@ class App:
         if databits7.get():
             command.append("-D")
 
-        command.append("\"" + inputdialog + "\"")
-        command.append("\"" + outputdialog + "\"")
-
         if makewavefile:
             command.append("-M")
+
+        command.append("\"" + inputdialog + "\"")
+        command.append("\"" + outputdialog + "\"")
 
         print("Command = " + " ".join(command))
 
@@ -78,7 +81,6 @@ class App:
     def inputdialog(self):
         global inputdialog
         inputdialog = askopenfilename(title="Select input file")
-
 
     def outputdialog(self):
         global outputdialog
