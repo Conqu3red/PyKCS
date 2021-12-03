@@ -5,93 +5,74 @@ from tkinter import *
 from tkinter.ttk import *
 from tkinter.messagebox import *
 from tkinter.filedialog import *
-from os import system
+
+import pykcs
 
 
 class App:
     def __init__(self, window) -> None:
         self.window = window
+
+        self.input_file = ""
+        self.output_file = ""
+        self.baud = IntVar(self.window, 300)
+        self.leader = StringVar(self.window, "")
+        self.parity = IntVar(self.window, pykcs.ParityMode.NONE)
+        
+        self.stopbits1 = BooleanVar(self.window, False)
+        self.databits7 = BooleanVar(self.window, False)
+        self.makewavefile = BooleanVar(self.window, True)
+
         self.baudframe()
         self.parityframe()
         self.leaderframe()
         self.bitsframe()
         self.fileframe()
 
-    def runall(self):
-        python = True
-        try:
-            with open("version.conf", "r+") as config:
-                for line in config:
-                    for part in line.split():
-                        if "python=" in part:
-                            if "false" in part:
-                                python = False
-                            break
-                        else:
-                            break
-            print("Execute with Python = " + str(python))
-            config.close()
-        except IOError as error:
-            print(error)
-            print("Warning: Reverting to defaults: Execute with Python = " + str(python))
-
-        try:
-            inputdialog
-            outputdialog
-        except NameError:
+    def run(self):
+        if not self.input_file or not self.output_file:
             showerror("File(s) not selected", "The input/output file(s) has not been selected/does not exist.")
-            quit()
-
-
-        command = []
-
-        if python:
-            command.append("py pykcs.py")
-        elif not python:
-            command.append("ckcs.exe")
-
-        command.append(baud.get())
-
-        if leader.get() != "":
-            command.append("-L" + leader.get())
-
-        command.append(parity.get())
-
-        if stopbits1.get():
-            command.append("-S")
-
-        if databits7.get():
-            command.append("-D")
-
-        command.append("\"" + inputdialog + "\"")
-        command.append("\"" + outputdialog + "\"")
-
-        if makewavefile:
-            command.append("-M")
-
-        print("Command = " + " ".join(command))
-
-        system(" ".join(command))
-
-        print("Done.")
+        
+        if self.makewavefile.get():
+            
+            with open(self.input_file, "rb") as f:
+                data = f.read()
+                pykcs.encode_file(
+                    data,
+                    self.output_file,
+                    baud=self.baud.get(),
+                    data_bits=7 if self.databits7.get() else 8,
+                    stop_bits=1 if self.stopbits1.get() else 2,
+                    parity_mode=self.parity.get(),
+                    leader=float(self.leader.get())
+                )
+                showinfo(f"Encoded Successfully", f"Encoded {len(data) * 8} bits.")
+        else:
+            parity_errors, data = pykcs.decode_file(
+                self.input_file,
+                baud=self.baud.get(),
+                data_bits=7 if self.databits7.get() else 8,
+                stop_bits=1 if self.stopbits1.get() else 2,
+                parity_mode=self.parity.get(),
+                leader=float(self.leader.get())
+            )
+            with open(self.output_file, "wb") as f:
+                f.write(data)
+            
+            showinfo(f"Decoded Successfully", f"Decoded {len(data) * 8} bits.\n{parity_errors} parity errors.")
+        
 
     def inputdialog(self):
-        global inputdialog
-        inputdialog = askopenfilename(title="Select input file")
+        self.input_file = askopenfilename(title="Select input file")
 
 
     def outputdialog(self):
-        global outputdialog
-        outputdialog = asksaveasfilename(title="Select output file")
+        self.output_file = asksaveasfilename(title="Select output file")
 
     def baudframe(self):
-        bauds = (("1200", "-B2"),
-                 ("600", "-B1"),
-                 ("300", ""))
-
-        global baud
-
-        baud = StringVar(self.window, "")
+        bauds = (("1200", 1200),
+                 ("600", 600),
+                 ("300", 300))
 
         baudframe = Frame()
         baudframe.grid(column=0, row=1)
@@ -104,32 +85,24 @@ class App:
                 baudframe,
                 text=b[0],
                 value=b[1],
-                variable=baud,
+                variable=self.baud,
             )
-            r.grid(padx=5, pady=5, sticky=N)
+            r.grid(sticky=W)
 
     def leaderframe(self):
-        global leader
-
-        leader = StringVar(self.window, "")
-
         leaderframe = Frame()
         leaderframe.grid(column=0, row=2)
 
         t = Label(leaderframe, text="Leader:")
-        t.grid(padx=5, pady=5, sticky=N)
+        t.grid(padx=5, pady=5, sticky=W)
 
-        e = Entry(leaderframe, textvariable=leader, width=6)
-        e.grid(padx=5, pady=5, sticky=N)
+        e = Entry(leaderframe, textvariable=self.leader, width=6)
+        e.grid(padx=5, pady=5, sticky=W)
 
     def parityframe(self):
-        paritys = (("None", ""),
-                   ("Odd", "-O"),
-                   ("Even", "-E"))
-
-        global parity
-
-        parity = StringVar(self.window, "")
+        paritys = (("None", pykcs.ParityMode.NONE.value),
+                   ("Odd", pykcs.ParityMode.ODD.value),
+                   ("Even", pykcs.ParityMode.EVEN.value))
 
         parityframe = Frame()
         parityframe.grid(column=0, row=3)
@@ -142,41 +115,31 @@ class App:
                 parityframe,
                 text=b[0],
                 value=b[1],
-                variable=parity,
+                variable=self.parity,
             )
-            r.grid(padx=5, pady=5, sticky=N)
+            r.grid(sticky=W)
 
     def bitsframe(self):
-        global stopbits1
-        global databits7
-
-        stopbits1 = BooleanVar(self.window, False)
-        databits7 = BooleanVar(self.window, False)
-
         bitsframe = Frame()
         bitsframe.grid(column=1, row=1, sticky=N)
 
         t = Label(bitsframe, text="Bit Configuration:")
         t.grid(padx=5, pady=5, sticky=N)
 
-        c1 = Checkbutton(bitsframe, text="1 stop bit (def. 2)", variable=stopbits1, onvalue=True, offvalue=False)
-        c1.grid(padx=5, pady=5, sticky=N)
+        c1 = Checkbutton(bitsframe, text="1 stop bit (def. 2)", variable=self.stopbits1, onvalue=True, offvalue=False)
+        c1.grid(padx=5, pady=5, sticky=W)
 
-        c2 = Checkbutton(bitsframe, text="7 data bits (def. 8)", variable=databits7, onvalue=True, offvalue=False)
-        c2.grid(padx=5, pady=5, sticky=N)
+        c2 = Checkbutton(bitsframe, text="7 data bits (def. 8)", variable=self.databits7, onvalue=True, offvalue=False)
+        c2.grid(padx=5, pady=5, sticky=W)
 
     def fileframe(self):
-        global makewavefile
-
-        makewavefile = BooleanVar(self.window, True)
-
         fileframe = Frame()
         fileframe.grid(column=1, row=2, sticky=N)
 
         t = Label(fileframe, text="File Options:")
         t.grid(padx=5, pady=5, sticky=N)
 
-        c1 = Checkbutton(fileframe, text="Encode File (alt: Decode File)", variable=makewavefile, onvalue=True,
+        c1 = Checkbutton(fileframe, text="Encode File (alt: Decode File)", variable=self.makewavefile, onvalue=True,
                          offvalue=False)
         c1.grid(padx=5, pady=5, sticky=N)
 
@@ -189,11 +152,11 @@ class App:
         t = Label(fileframe, text="Generate File:")
         t.grid(padx=5, pady=5, sticky=N)
 
-        c1 = Checkbutton(fileframe, text="Encode File (alt: Decode File)", variable=makewavefile, onvalue=True,
+        c1 = Checkbutton(fileframe, text="Encode File (alt: Decode File)", variable=self.makewavefile, onvalue=True,
                          offvalue=False)
         c1.grid(padx=5, pady=5, sticky=N)
 
-        b2 = Button(fileframe, text="Generate Output", command=lambda: self.runall())
+        b2 = Button(fileframe, text="Generate Output", command=lambda: self.run())
         b2.grid(padx=5, pady=10, sticky=N)
 
 
