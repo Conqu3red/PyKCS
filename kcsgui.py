@@ -65,7 +65,6 @@ class App:
     def inputdialog(self):
         self.input_file = askopenfilename(title="Select input file")
 
-
     def outputdialog(self):
         self.output_file = asksaveasfilename(title="Select output file")
 
