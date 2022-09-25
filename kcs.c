@@ -30,7 +30,7 @@ typedef struct {
     ByteBuffer *dataChunks;
 } WavFile;
 
-#define READ_VAL(v) nread = fread(&v, sizeof v, 1, file)
+#define READ_VAL(v) nread = fread(&v, sizeof(v), 1, file)
 
 size_t fbytesleft(FILE *fp) {
     size_t cur = ftell(fp);
@@ -65,26 +65,48 @@ WavFile *wavLoadFile(FILE *file) {
     wavFile->dataChunks = malloc(sizeof(ByteBuffer));
     wavFile->dataChunkCount = 1;
 
+
+    bool hadDataChunk = false;
     // data chunk
-    READ_VAL(chunkID);
+    while (1) {
+        if (!fbytesleft(file)) {
+            break;
+        }
+        READ_VAL(chunkID);
+        printf("Chunk: %.4s\n", chunkID);
+        
+        ByteBuffer *chunk = wavFile->dataChunks;
+        uint32_t size = 0;
+        READ_VAL(size);
+        printf("Size: %u\n", size);
+        size_t bytes_left = fbytesleft(file);
+        if (chunkID[0] != 'd' || chunkID[1] != 'a' || chunkID[2] != 't' || chunkID[3] != 'a') {
+            if (size > bytes_left) {
+                printf("Wav Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", size, bytes_left);
+                break;
+            }
+            else {
+                fseek(file, size, SEEK_CUR);
+            }
+            continue;
+        }
+        chunk->size = (size_t)size;
+        wavFile->dataChunks[0].data = NULL;
 
-    ByteBuffer *chunk = wavFile->dataChunks;
-    uint32_t size = 0;
-    READ_VAL(size);
-    printf("Size: %u\n", size);
-    chunk->size = (size_t)size;
-    if (chunkID[0] != 'd' || chunkID[1] != 'a' || chunkID[2] != 't' || chunkID[3] != 'a') {
-        printf("Error: chunk ID is incorrect, expected 'data'\n");
+        if (chunk->size > bytes_left) {
+            printf("Wav Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", chunk->size, bytes_left);
+            break;
+        }
+
+        chunk->data = malloc(chunk->size); // TODO: sanity checks
+        nread = fread(chunk->data, sizeof(uint8_t), chunk->size, file);
+        hadDataChunk = true;
+        break;
     }
-    wavFile->dataChunks[0].data = NULL;
 
-    size_t bytes_left = fbytesleft(file);
-    if (chunk->size > bytes_left) {
-        printf("Wav Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", chunk->size, bytes_left);
+    if (!hadDataChunk) {
+        printf("No data chunk read!\n");
     }
-
-    chunk->data = malloc(chunk->size); // TODO: sanity checks
-    nread = fread(chunk->data, sizeof(uint8_t), chunk->size, file);
     //READ_VAL(wavFile.data.chunkID);
     //READ_VAL(wavFile.data.chunkSize);
     //wavFile.data.data = malloc(wavFile.data.chunkSize);
@@ -105,8 +127,6 @@ uint8_t wavGetFrame(WavFile *wavFile, uint64_t index) {
     }
     printf("Error: Index exceeded end of Wav File data.\n");
     return 0;
-
-    uint8_t a[2] = {255, 255};
 }
 
 uint64_t wavGetNumFrames(WavFile *wavFile) {
@@ -147,6 +167,7 @@ uint8_t count_bits(uint8_t num) {
          + ((num >> 7) & 1);
 }
 
+static bool getBitBegun = false;
 static uint8_t getBitPrev = 0;
 const uint32_t BASE_FREQ = 2400; // represents a 1
 
@@ -158,11 +179,24 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
     uint32_t top_val = 255;
     uint64_t local_index = 0;
 
+    uint32_t sLength = 0;
+
     uint8_t cLength = 0;
 
-    // TODO: add some varation, I think we end up "lagging" behind
-    while (local_index < frame_window) {
+    const uint32_t threshold = 2 * cyclesPerBit;
+
+    while (local_index < frame_window + threshold) {
+        if (((*frameIndex) + local_index) * (wavFile->fmt.bitsPerSample / 8) >= wavFile->dataChunks[0].size) {
+            if (!peek) {
+                (*frameIndex) += local_index;
+            }
+            return false; // end of data
+        }
         uint8_t x = wavGetFrame(wavFile, (*frameIndex) + local_index);
+        if (!getBitBegun) {
+            getBitBegun = true;
+            getBitPrev = x;
+        }
         cLength++;
         local_index += 1;
 
@@ -176,16 +210,30 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
 
         if ((getBitPrev >> 7) != (x >> 7)) {
             //printf("cycle %d\n", cLength);
+            sLength += cLength;
             cLength = 0;
             cycles += 1;
         }
 
         getBitPrev = x;
+
+        if (cycles == cyclesPerBit * 4) {
+            break;
+        } else if (local_index >= frame_window - threshold && cycles == cyclesPerBit * 2) {
+            break;
+        }
     }
+    if (frame_window - local_index != 1) printf("%d\n", frame_window - local_index);
+
+    // TODO: need to stop on the end of a sign swap?
 
     //printf("%d\n", local_index);
 
-    printf("Cycles: %d\n", cycles);
+    //printf("Cycles: %d\n", cycles);
+    double avg = (double)sLength / (double)cycles;
+    /* if (avg != 4.5 && avg != 9.0) {
+        printf("%f\n", avg);
+    } */
 
     if (!peek) {
         (*frameIndex) += local_index;
@@ -217,19 +265,29 @@ DecodedKCS decode_kcs(
     uint64_t frames = wavGetNumFrames(wavFile);
     uint64_t frameIndex = 0;
 
+    bool complete = false;
+
     if (wavFile->fmt.sampleRate != 22050) {
-        
+        printf("Currently only 22050hz is supported.\n");
     }
     else {
-        while (get_bit(wavFile, 1, &frameIndex, true)) {}
+        while (get_bit(wavFile, 1, &frameIndex, true)) {
+            get_bit(wavFile, 1, &frameIndex, false);
+        }
         printf("Leader done.\n");
 
         while (frameIndex < frames) {
             if (bits_done == 0) {
                 for (uint16_t i = 0; i < start_bits; i++) {
-                    get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                    bool start_bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                    if (start_bit) {
+                        printf("Start bit was 1, reached end of input.\n");
+                        complete = true;
+                        break;
+                    }
                 }
             }
+            if (complete) break;
 
             bool bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
             num += bit << bits_done;
@@ -246,7 +304,7 @@ DecodedKCS decode_kcs(
                     buffer.data = realloc(buffer.data, buffer.size);
                 }
 
-                printf("<parity+stop>\n");
+                //printf("<parity+stop>\n");
 
                 // parity checks
                 if (parity_mode == PARITY_ODD) {
@@ -273,7 +331,7 @@ DecodedKCS decode_kcs(
                     }
                 }
 
-                printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
+                //printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
             }
         }
     }
@@ -372,7 +430,7 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
         // TODO: make wavefiles
     }
     else {
-        FILE *file = fopen(*infile, "r");
+        FILE *file = fopen(*infile, "rb+");
 
         if (file == NULL) {
             printf("File not found.\n");
