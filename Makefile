@@ -4,7 +4,7 @@ FLAGS= -O3 -g
 
 TARGET=ckcs.exe
 INCLUDE=.
-SRC=kcs.c bpf.c
+SRC=kcs.c
 
 
 .DEFAULT_GOAL := default

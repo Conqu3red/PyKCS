@@ -4,9 +4,6 @@
 #include <stdbool.h>
 #include <math.h>
 #include <string.h>
-#include <bpf.h>
-
-static biquad* biquad_test = NULL;
 
 typedef struct {
     uint32_t chunkSize;
@@ -437,7 +434,6 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
 }
 
 int main(int argc, const char *const argv[]) {
-    biquad_test = BiQuad_new_BPF(2450.0, 22050, 3); // idk?
     if (argc == 1) {
         printf("%s", info);
         return EXIT_SUCCESS;
