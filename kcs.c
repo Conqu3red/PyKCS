@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <math.h>
 #include <string.h>
+#include <bpf.h>
+
+static biquad* biquad_test = NULL;
 
 typedef struct {
     uint32_t chunkSize;
@@ -24,7 +27,7 @@ typedef struct {
     uint32_t chunkSize;
     FmtChunk fmt;
     size_t dataChunkCount;
-    ByteBuffer *dataChunks; // TODO: multiple data chunks
+    ByteBuffer *dataChunks;
 } WavFile;
 
 #define READ_VAL(v) nread = fread(&v, sizeof v, 1, file)
@@ -52,6 +55,7 @@ WavFile *wavLoadFile(FILE *file) {
     READ_VAL(chunkID);
     READ_VAL(wavFile->fmt.chunkSize);
     READ_VAL(wavFile->fmt.audioFormat);
+    //printf("wav audio format: %d\n", wavFile->fmt.audioFormat);
     READ_VAL(wavFile->fmt.numChannels);
     READ_VAL(wavFile->fmt.sampleRate);
     READ_VAL(wavFile->fmt.byteRate);
@@ -61,28 +65,26 @@ WavFile *wavLoadFile(FILE *file) {
     wavFile->dataChunks = malloc(sizeof(ByteBuffer));
     wavFile->dataChunkCount = 1;
 
-
     // data chunk
-    for (size_t i = 0; fbytesleft(file); i++) {
-        if ((i + 1) > wavFile->dataChunkCount) {
-            wavFile->dataChunkCount = i + 1;
-            wavFile->dataChunks = realloc(wavFile->dataChunks, sizeof(ByteBuffer) * wavFile->dataChunkCount);
-        }
-        READ_VAL(chunkID);
-        ByteBuffer *chunk = wavFile->dataChunks + i;
-        uint32_t size = 0;
-        READ_VAL(size);
-        chunk->size = (size_t)size;
-        wavFile->dataChunks[i].data = NULL;
+    READ_VAL(chunkID);
 
-        size_t bytes_left = fbytesleft(file);
-        if (chunk->size > bytes_left) {
-            printf("Wav Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", chunk->size, bytes_left);
-        }
-
-        chunk->data = malloc(chunk->size); // TODO: sanity checks
-        nread = fread(chunk->data, sizeof(uint8_t), chunk->size, file);
+    ByteBuffer *chunk = wavFile->dataChunks;
+    uint32_t size = 0;
+    READ_VAL(size);
+    printf("Size: %u\n", size);
+    chunk->size = (size_t)size;
+    if (chunkID[0] != 'd' || chunkID[1] != 'a' || chunkID[2] != 't' || chunkID[3] != 'a') {
+        printf("Error: chunk ID is incorrect, expected 'data'\n");
     }
+    wavFile->dataChunks[0].data = NULL;
+
+    size_t bytes_left = fbytesleft(file);
+    if (chunk->size > bytes_left) {
+        printf("Wav Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", chunk->size, bytes_left);
+    }
+
+    chunk->data = malloc(chunk->size); // TODO: sanity checks
+    nread = fread(chunk->data, sizeof(uint8_t), chunk->size, file);
     //READ_VAL(wavFile.data.chunkID);
     //READ_VAL(wavFile.data.chunkSize);
     //wavFile.data.data = malloc(wavFile.data.chunkSize);
@@ -93,19 +95,18 @@ WavFile *wavLoadFile(FILE *file) {
 
 uint8_t wavGetFrame(WavFile *wavFile, uint64_t index) {
     // BUG: no support for multi-byte resolutions / multiple channels
-    uint64_t chunkIndex = 0;
-    while (chunkIndex < wavFile->dataChunkCount) {
-        if (index < wavFile->dataChunks[chunkIndex].size) {
-            return wavFile->dataChunks[chunkIndex].data[index];
+    uint16_t bytesPerSample = wavFile->fmt.bitsPerSample / 8;
+    if (index < wavFile->dataChunks[0].size) {
+        if (bytesPerSample == 2) {
+            //uint16_t v = *(uint16_t*)(wavFile->dataChunks[0].data + (index * 2));
+            return wavFile->dataChunks[0].data[index * bytesPerSample + 1]; // most significant byte?
         }
-        else {
-            index -= wavFile->dataChunks[chunkIndex].size;
-            chunkIndex += 1;
-        }
+        return wavFile->dataChunks[0].data[index];
     }
-
     printf("Error: Index exceeded end of Wav File data.\n");
     return 0;
+
+    uint8_t a[2] = {255, 255};
 }
 
 uint64_t wavGetNumFrames(WavFile *wavFile) {
@@ -146,28 +147,50 @@ uint8_t count_bits(uint8_t num) {
          + ((num >> 7) & 1);
 }
 
-bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex) {
-    uint32_t bit_length = cyclesPerBit * cycleLength;
+static uint8_t getBitPrev = 0;
+const uint32_t BASE_FREQ = 2400; // represents a 1
 
+bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool peek) {
+    uint32_t frame_window = (uint32_t)round((((double)wavFile->fmt.sampleRate)*cyclesPerBit*2)/(double)BASE_FREQ);
+    
     uint32_t cycles = 0;
     bool top = false;
     uint32_t top_val = 255;
     uint64_t local_index = 0;
 
-    while (local_index < bit_length) {
+    uint8_t cLength = 0;
+
+    // TODO: add some varation, I think we end up "lagging" behind
+    while (local_index < frame_window) {
         uint8_t x = wavGetFrame(wavFile, (*frameIndex) + local_index);
+        cLength++;
         local_index += 1;
 
-        if (x == top_val) top = true;
+        double x_dbl = ((double)x - 127.0) / (double)128;
+        double res = BiQuad(x_dbl, biquad_test);
+        //printf("biquad? %f %f\n", res, x_dbl);
+        // BUG: I think BPF expects a sine wave not a sawtooth one
+        // might not even need Band Pass Filter, should just add some more sophisticated code
+        // to recognise frequency distortion, and allow volume variations, as well as some err correction?
+        // goal is to be able to load actual tape recordings.
 
-        if (!x && top) {
+        if ((getBitPrev >> 7) != (x >> 7)) {
+            //printf("cycle %d\n", cLength);
+            cLength = 0;
             cycles += 1;
-            top = false;
         }
+
+        getBitPrev = x;
     }
 
-    (*frameIndex) += local_index;
-    return cycles == cyclesPerBit * 2;
+    //printf("%d\n", local_index);
+
+    printf("Cycles: %d\n", cycles);
+
+    if (!peek) {
+        (*frameIndex) += local_index;
+    }
+    return cycles >= cyclesPerBit * 3;
 }
 
 struct {
@@ -198,25 +221,17 @@ DecodedKCS decode_kcs(
         
     }
     else {
-        while (true) {
-            bool bit = get_bit(wavFile, 1, &frameIndex);
-            if (!bit) {
-                frameIndex -= cycleLength;
-                break;
-            }
-            else {
-                frames -= cycleLength;
-            }
-        }
+        while (get_bit(wavFile, 1, &frameIndex, true)) {}
+        printf("Leader done.\n");
 
         while (frameIndex < frames) {
             if (bits_done == 0) {
                 for (uint16_t i = 0; i < start_bits; i++) {
-                    get_bit(wavFile, cycles_per_bit, &frameIndex);
+                    get_bit(wavFile, cycles_per_bit, &frameIndex, false);
                 }
             }
 
-            bool bit = get_bit(wavFile, cycles_per_bit, &frameIndex);
+            bool bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
             num += bit << bits_done;
 
             bits_done += 1;
@@ -231,16 +246,18 @@ DecodedKCS decode_kcs(
                     buffer.data = realloc(buffer.data, buffer.size);
                 }
 
+                printf("<parity+stop>\n");
+
                 // parity checks
                 if (parity_mode == PARITY_ODD) {
-                    bool p = get_bit(wavFile, cycles_per_bit, &frameIndex);
+                    bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
                     uint8_t bit_count = count_bits(num) + p;
                     if (bit_count % 2 != 1)
                         parity_errors += 1;
                 }
 
                 if (parity_mode == PARITY_EVEN) {
-                    bool p = get_bit(wavFile, cycles_per_bit, &frameIndex);
+                    bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
                     uint8_t bit_count = count_bits(num) + p;
                     if (bit_count % 2 != 0)
                         parity_errors += 1;
@@ -250,8 +267,13 @@ DecodedKCS decode_kcs(
                 bits_done = 0;
 
                 for (uint8_t i = 0; i < stop_bits; i++) {
-                    get_bit(wavFile, cycles_per_bit, &frameIndex);
+                    bool stopBit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                    if (!stopBit) {
+                        printf("ERROR: stop bit is 0\n");
+                    }
                 }
+
+                printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
             }
         }
     }
@@ -279,7 +301,7 @@ struct {
 
 const char *info = "KCS Version 0.1  21-Nov-2021\n"
 "Use: KCS [options] infile [outfile]\n\n"
-"-Bn baud  1=1600 2=1200  -O  odd parity\n"
+"-Bn baud  1=600 2=1200   -O  odd parity\n"
 "-Ln leader (sec)         -E  even parity\n"
 "-C  console output       -D  7 data bits\n"
 "-M  make wavefile        -S  1 stop bit\n"
@@ -395,6 +417,7 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
 }
 
 int main(int argc, const char *const argv[]) {
+    biquad_test = BiQuad_new_BPF(2450.0, 22050, 3); // idk?
     if (argc == 1) {
         printf("%s", info);
         return EXIT_SUCCESS;

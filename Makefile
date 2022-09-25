@@ -3,11 +3,12 @@ CC=gcc
 FLAGS= -O3 -g
 
 TARGET=ckcs.exe
-SRC=kcs.c
+INCLUDE=.
+SRC=kcs.c bpf.c
 
 
 .DEFAULT_GOAL := default
 
 default: $(SRC)
-	$(CC) $(FLAGS) $(SRC) -o $(TARGET) 
+	$(CC) $(FLAGS) $(SRC) -I${INCLUDE} -o $(TARGET) 
 	@echo $(TARGET) Succesfully installed.
