@@ -107,11 +107,7 @@ WavFile *wavLoadFile(FILE *file) {
     if (!hadDataChunk) {
         printf("No data chunk read!\n");
     }
-    //READ_VAL(wavFile.data.chunkID);
-    //READ_VAL(wavFile.data.chunkSize);
-    //wavFile.data.data = malloc(wavFile.data.chunkSize);
-    //nread = fread(wavFile.data.data, sizeof(uint8_t), wavFile.data.chunkSize, file);
-
+    
     return wavFile;
 }
 
@@ -131,12 +127,7 @@ uint8_t wavGetFrame(WavFile *wavFile, uint64_t index) {
 
 uint64_t wavGetNumFrames(WavFile *wavFile) {
     // TODO: better solution, maybe like a FILE* ?
-    uint64_t c = 0;
-    for (size_t i = 0; i < wavFile->dataChunkCount; i++) {
-        c += wavFile->dataChunks[i].size / (wavFile->fmt.bitsPerSample / 8);
-    }
-
-    return c;
+    return wavFile->dataChunks[0].size / (wavFile->fmt.bitsPerSample / 8);
 }
 
 void wavFree(WavFile *wavFile) {
@@ -167,7 +158,6 @@ uint8_t count_bits(uint8_t num) {
          + ((num >> 7) & 1);
 }
 
-static bool getBitBegun = false;
 static uint8_t getBitPrev = 0;
 const uint32_t BASE_FREQ = 2400; // represents a 1
 
@@ -175,13 +165,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
     uint32_t frame_window = (uint32_t)round((((double)wavFile->fmt.sampleRate)*cyclesPerBit*2)/(double)BASE_FREQ);
     
     uint32_t cycles = 0;
-    bool top = false;
-    uint32_t top_val = 255;
     uint64_t local_index = 0;
-
-    uint32_t sLength = 0;
-
-    uint8_t cLength = 0;
 
     const uint32_t threshold = 2 * cyclesPerBit;
 
@@ -192,26 +176,12 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
             }
             break; // end of data
         }
+        
         uint8_t x = wavGetFrame(wavFile, (*frameIndex) + local_index);
-        if (!getBitBegun) {
-            getBitBegun = true;
-            getBitPrev = x;
-        }
-        cLength++;
-        local_index += 1;
-
-        double x_dbl = ((double)x - 127.0) / (double)128;
-        double res = BiQuad(x_dbl, biquad_test);
-        //printf("biquad? %f %f\n", res, x_dbl);
-        // BUG: I think BPF expects a sine wave not a sawtooth one
-        // might not even need Band Pass Filter, should just add some more sophisticated code
-        // to recognise frequency distortion, and allow volume variations, as well as some err correction?
-        // goal is to be able to load actual tape recordings.
+        local_index++;
 
         if ((getBitPrev >> 7) != (x >> 7)) {
             //printf("%d ", cLength);
-            sLength += cLength;
-            cLength = 0;
             cycles += 1;
         }
 
@@ -224,15 +194,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
         }
     }
 
-    // TODO: need to stop on the end of a sign swap?
-
-    //printf("%d\n", local_index);
-
     //printf("\nCycles: %d\n", cycles);
-    double avg = (double)sLength / (double)cycles;
-    /* if (avg != 4.5 && avg != 9.0) {
-        printf("%f\n", avg);
-    } */
 
     if (!peek) {
         (*frameIndex) += local_index;
@@ -332,9 +294,6 @@ DecodedKCS decode_kcs(
                 }
 
                 //printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
-                /* if (buffer.data[byteIndex - 1] != 0xFF) {
-                    break;
-                } */
             }
         }
     }
