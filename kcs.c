@@ -73,12 +73,12 @@ WavFile *wavLoadFile(FILE *file) {
             break;
         }
         READ_VAL(chunkID);
-        printf("Chunk: %.4s\n", chunkID);
+        //printf("Chunk: %.4s\n", chunkID);
         
         ByteBuffer *chunk = wavFile->dataChunks;
         uint32_t size = 0;
         READ_VAL(size);
-        printf("Size: %u\n", size);
+        //printf("Size: %u\n", size);
         size_t bytes_left = fbytesleft(file);
         if (chunkID[0] != 'd' || chunkID[1] != 'a' || chunkID[2] != 't' || chunkID[3] != 'a') {
             if (size > bytes_left) {
@@ -190,7 +190,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
             if (!peek) {
                 (*frameIndex) += local_index;
             }
-            return false; // end of data
+            break; // end of data
         }
         uint8_t x = wavGetFrame(wavFile, (*frameIndex) + local_index);
         if (!getBitBegun) {
@@ -209,7 +209,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
         // goal is to be able to load actual tape recordings.
 
         if ((getBitPrev >> 7) != (x >> 7)) {
-            //printf("cycle %d\n", cLength);
+            //printf("%d ", cLength);
             sLength += cLength;
             cLength = 0;
             cycles += 1;
@@ -223,13 +223,12 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
             break;
         }
     }
-    if (frame_window - local_index != 1) printf("%d\n", frame_window - local_index);
 
     // TODO: need to stop on the end of a sign swap?
 
     //printf("%d\n", local_index);
 
-    //printf("Cycles: %d\n", cycles);
+    //printf("\nCycles: %d\n", cycles);
     double avg = (double)sLength / (double)cycles;
     /* if (avg != 4.5 && avg != 9.0) {
         printf("%f\n", avg);
@@ -286,6 +285,7 @@ DecodedKCS decode_kcs(
                         break;
                     }
                 }
+                //printf("<start bit done>\n");
             }
             if (complete) break;
 
@@ -299,7 +299,7 @@ DecodedKCS decode_kcs(
                 byteIndex += 1;
 
                 // handle if buffer is full
-                if (byteIndex > buffer.size) {
+                if (byteIndex >= buffer.size) {
                     buffer.size += 1024;
                     buffer.data = realloc(buffer.data, buffer.size);
                 }
@@ -332,6 +332,9 @@ DecodedKCS decode_kcs(
                 }
 
                 //printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
+                /* if (buffer.data[byteIndex - 1] != 0xFF) {
+                    break;
+                } */
             }
         }
     }
