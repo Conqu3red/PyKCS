@@ -484,12 +484,19 @@ WavFile* KCS_encode(
         // actual data
         uint8_t num = data.data[i];
 
-        for (uint16_t j = 0; j < 8; j++) {
-            write_bit(wavFile, cycles_per_bit, &frameIndex, num & 1);
-            num = num >> 1;
+        for (uint16_t j = 0; j < data_bits; j++) {
+            write_bit(wavFile, cycles_per_bit, &frameIndex, (num >> j) & 1);
         }
 
-        // TODO: parity etc
+        // parity bits
+        if (parity_mode == PARITY_ODD) {
+            uint8_t bit_count = count_bits(num);
+            write_bit(wavFile, cycles_per_bit, &frameIndex, bit_count % 2 == 0);
+        }
+        if (parity_mode == PARITY_EVEN) {
+            uint8_t bit_count = count_bits(num);
+            write_bit(wavFile, cycles_per_bit, &frameIndex, bit_count % 2 == 1);
+        }
 
         // stop bits
         for (uint16_t j = 0; j < stop_bits; j++) {
