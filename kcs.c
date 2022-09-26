@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 //#define KCS_DEBUG
 //#define KCS_DEBUG_CYLES
@@ -29,8 +30,6 @@ typedef struct WavFile {
     ByteBuffer data;
 } WavFile;
 
-#define READ_VAL(v) nread = fread(&v, sizeof(v), 1, file)
-
 size_t fbytesleft(FILE *fp) {
     size_t cur = ftell(fp);
     fseek(fp, 0L, SEEK_END);
@@ -48,6 +47,22 @@ void wavFree(WavFile *wavFile) {
     }
 }
 
+WavFile* wavNewDefault() {
+    WavFile *wavFile = malloc(sizeof(WavFile));
+    wavFile->fmt.audioFormat = 1; // PCM
+    wavFile->fmt.numChannels = 1; // Mono
+    wavFile->fmt.sampleRate = 22050;
+    wavFile->fmt.bitsPerSample = 8; // 8-bit
+    wavFile->fmt.byteRate = wavFile->fmt.sampleRate * wavFile->fmt.bitsPerSample / 8;
+    wavFile->fmt.blockAlign = wavFile->fmt.numChannels * wavFile->fmt.bitsPerSample / 8;
+
+    wavFile->data.size = 0;
+    wavFile->data.data = malloc(0);
+    return wavFile;
+}
+
+#define READ_VAL(v) nread = fread(&v, sizeof(v), 1, file)
+
 WavFile *wavLoadFile(FILE *file) {
     WavFile *wavFile = malloc(sizeof(WavFile));
 
@@ -62,7 +77,7 @@ WavFile *wavLoadFile(FILE *file) {
         return NULL;
     }
     READ_VAL(wavFile->chunkSize);
-    READ_VAL(chunkID); // format
+    READ_VAL(chunkID);
     if (chunkID[0] != 'W' || chunkID[1] != 'A' || chunkID[2] != 'V' || chunkID[3] != 'E') {
         printf("WAV Read Error: Expected chunk ID 'WAVE' but read '%.4s' instead.\n", chunkID);
         wavFree(wavFile);
@@ -131,7 +146,45 @@ WavFile *wavLoadFile(FILE *file) {
     return wavFile;
 }
 
-uint8_t wavGetFrame(WavFile *wavFile, uint64_t index) {
+#undef READ_VAL
+#define WRITE_VAL(v) nwrite = fwrite(&v, sizeof(v), 1, file)
+
+bool wavWriteFile(WavFile *wavFile, FILE* file) {
+    size_t nwrite;
+    
+    // header info
+    char riff[4] = {'R', 'I', 'F', 'F'};
+    WRITE_VAL(riff);
+    wavFile->chunkSize = 4 + (8 + wavFile->fmt.chunkSize) + (8 + wavFile->data.size);
+    WRITE_VAL(wavFile->chunkSize);
+    char wave[4] = {'W', 'A', 'V', 'E'};
+    WRITE_VAL(wave);
+
+    char fmt[4] = {'f', 'm', 't', ' '};
+    WRITE_VAL(fmt);
+
+    wavFile->fmt.chunkSize = 16; // should this really be hardcoded?
+    WRITE_VAL(wavFile->fmt.chunkSize);
+    WRITE_VAL(wavFile->fmt.audioFormat);
+    WRITE_VAL(wavFile->fmt.numChannels);
+    WRITE_VAL(wavFile->fmt.sampleRate);
+    WRITE_VAL(wavFile->fmt.byteRate);
+    WRITE_VAL(wavFile->fmt.blockAlign);
+    WRITE_VAL(wavFile->fmt.bitsPerSample);
+
+    // data sub-chunk
+    char data[4] = {'d', 'a', 't', 'a'};
+    WRITE_VAL(data);
+    uint32_t size = (uint32_t)wavFile->data.size;
+    WRITE_VAL(size);
+    nwrite = fwrite(wavFile->data.data, 1, size, file);
+
+    return true;
+}
+
+#undef WRITE_VAL
+
+uint8_t wavGetFrame(WavFile *wavFile, size_t index) {
     // BUG: no support for multi-byte resolutions / multiple channels
     uint16_t bytesPerSample = wavFile->fmt.bitsPerSample / 8;
     if (index < wavFile->data.size) {
@@ -143,6 +196,20 @@ uint8_t wavGetFrame(WavFile *wavFile, uint64_t index) {
     }
     printf("Error: Index exceeded end of Wav File data.\n");
     return 0;
+}
+
+void wavSetFrame(WavFile *wavFile, size_t index, uint8_t value) {
+    uint16_t bytesPerSample = wavFile->fmt.bitsPerSample / 8;
+    if (index * bytesPerSample + (bytesPerSample - 1) >= wavFile->data.size) {
+        wavFile->data.size += 1024;
+        wavFile->data.data = realloc(wavFile->data.data, wavFile->data.size);
+        memset(wavFile->data.data + wavFile->data.size - 1024, 0, 1024);
+    }
+    if (bytesPerSample == 2) {
+        //uint16_t v = *(uint16_t*)(wavFile->dataChunks[0].data + (index * 2));
+        wavFile->data.data[index * bytesPerSample + 1] = value; // most significant byte?
+    }
+    wavFile->data.data[index] = value;
 }
 
 uint64_t wavGetNumFrames(WavFile *wavFile) {
@@ -225,7 +292,7 @@ struct {
     ByteBuffer data;
 } typedef DecodedKCS;
 
-DecodedKCS decode_kcs(
+DecodedKCS KCS_decode(
     WavFile *wavFile, uint32_t baud, uint8_t data_bits, uint8_t stop_bits,
     uint8_t start_bits, ParityMode parity_mode, uint16_t leader
 ) {
@@ -324,7 +391,76 @@ DecodedKCS decode_kcs(
     return decoded;
 }
 
-#undef READ_VAL
+void write_cycle(WavFile *wavFile, uint64_t *frameIndex, bool value) {
+    const uint16_t CENTER = 128;
+    const uint16_t AMPLITUDE = 256;
+
+    uint32_t cycle_length;
+    
+    if (value) {
+        // short cycle
+        cycle_length = (uint32_t)((double)wavFile->fmt.sampleRate / BASE_FREQ);
+
+    } else {
+        // long cycle
+        cycle_length = (uint32_t)((double)wavFile->fmt.sampleRate / BASE_FREQ * 2);
+    }
+
+    const uint32_t halfway = cycle_length / 2;
+    for (int i = 0; i < cycle_length; i++) {
+        wavSetFrame(wavFile, *frameIndex, i < halfway ? (CENTER+AMPLITUDE/2) : (CENTER-AMPLITUDE/2));
+        (*frameIndex)++;
+    }
+}
+
+void write_bit(WavFile *wavFile, uint16_t cycles_per_bit, uint64_t *frameIndex, bool value) {
+    for (int i = 0; i < (value ? (cycles_per_bit * 2) : cycles_per_bit); i++) {
+        write_cycle(wavFile, frameIndex, value);
+    }
+}
+
+WavFile* KCS_encode(
+    ByteBuffer data,
+    uint32_t baud, uint8_t data_bits, uint8_t stop_bits,
+    uint8_t start_bits, ParityMode parity_mode, uint16_t leader
+) {
+    uint16_t cycles_per_bit = 1200 / baud;
+    WavFile* wavFile = wavNewDefault();
+
+    uint64_t frameIndex = 0;
+
+    // TODO: make this output work in the decoder!
+    // leader
+    if (leader > 0) {
+        while (frameIndex < wavFile->fmt.sampleRate * (uint32_t)leader) {
+            write_bit(wavFile, 1, &frameIndex, 1);
+        }
+    }
+
+    for (size_t i = 0; i < data.size; i++) {
+        // start bits
+        for (uint16_t j = 0; j < start_bits; j++) {
+            write_bit(wavFile, cycles_per_bit, &frameIndex, 0);
+        }
+
+        // actual data
+        uint8_t num = data.data[i];
+
+        for (uint16_t j = 0; j < 8; j++) {
+            write_bit(wavFile, cycles_per_bit, &frameIndex, num & 1);
+            num = num >> 1;
+        }
+
+        // TODO: parity etc
+
+        // stop bits
+        for (uint16_t j = 0; j < stop_bits; j++) {
+            write_bit(wavFile, cycles_per_bit, &frameIndex, 1);
+        }
+    }
+
+    return wavFile;
+}
 
 struct {
     uint32_t baud;
@@ -337,6 +473,88 @@ struct {
     bool consoleOutput;
 
 } typedef KCS_Config;
+
+int cmdDecode(KCS_Config config, char * *infile, char * *outfile) {
+    FILE *file = fopen(*infile, "rb+");
+
+    if (file == NULL) {
+        printf("File not found.\n");
+        return EXIT_FAILURE;
+    }
+
+    WavFile *wavFile = wavLoadFile(file);
+    if (wavFile == NULL) {
+        printf("Error occurred when trying to load WAV file, aborting.");
+        return EXIT_FAILURE;
+    }
+
+    //printf("format: %.4s, %.4s\n", wavFile.chunkID, wavFile.format);
+    //printf("ChunkSize: %d\n", wavFile.chunkSize);
+    //printf("Sample Rate: %dhz\n", wavFile.fmt.sampleRate);
+
+    fclose(file);
+
+    clock_t start = clock();
+
+    DecodedKCS decodedKCS = KCS_decode(
+        wavFile, config.baud, config.data_bits, config.stop_bits, 1, config.parity_mode, config.leader
+    );
+
+    clock_t end = clock();
+
+    ByteBuffer buf = decodedKCS.data;
+
+    //printf("Decoded Size: %d\n", buf.size);
+    if (config.consoleOutput) {
+        printf("%.*s\n", buf.size, buf.data);
+    }
+    else {
+        // save to outfile
+        FILE *f = fopen(*outfile, "wb");
+        fwrite(buf.data, buf.size, 1, f);
+        fclose(f);
+    }
+
+    printf("%d bytes decoded", buf.size);
+    if (config.parity_mode != PARITY_NONE) {
+        printf(", %d parity errors.", decodedKCS.parity_errors);
+    }
+    printf("\ndone in %.3fs\n", (double)(end - start) / CLOCKS_PER_SEC);
+
+    wavFree(wavFile);
+    free(buf.data);
+        return EXIT_SUCCESS;
+}
+
+int cmdEncode(KCS_Config config, char * *infile, char * *outfile) {
+    FILE *file = fopen(*infile, "rb+");
+
+    if (file == NULL) {
+        printf("File not found.\n");
+        return EXIT_FAILURE;
+    }
+
+    ByteBuffer buf = {fbytesleft(file), NULL};
+    buf.data = malloc(buf.size);
+    fread(buf.data, 1, buf.size, file);
+
+    WavFile *wavFile = KCS_encode(
+        buf, config.baud, config.data_bits, config.stop_bits,
+        config.start_bits, config.parity_mode, config.leader
+    );
+
+    // TODO: handle NULL wavFile
+
+    FILE *f = fopen(*outfile, "wb");
+    wavWriteFile(wavFile, f);
+    fclose(f);
+
+    free(buf.data);
+    wavFree(wavFile);
+    
+    
+    return EXIT_SUCCESS;
+}
 
 const char *info = "KCS Version 0.1  21-Nov-2021\n"
 "Use: KCS [options] infile [outfile]\n\n"
@@ -399,9 +617,13 @@ int getOptions(int argc, const char *const argv[], KCS_Config *config, char * *i
 int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
     if (*outfile == NULL) {
         // TODO: generate outfile name based on infile and mode
-        const char *temp = "test.txt";
-        *outfile = malloc(strlen(temp) + 1);
-        strcpy(*outfile, temp);
+        *outfile = malloc(strlen(*infile) + 3 + 1);
+        strcpy(*outfile, *infile);
+        if (config.makeWaveFile) {
+            strcat(*outfile, ".wav");
+        } else {
+            strcat(*outfile, ".txt");
+        }
     }
 
     printf("INFILE:  %s\n", *infile);
@@ -409,51 +631,10 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
     
     if (config.makeWaveFile) {
         // TODO: make wavefiles
+        return cmdEncode(config, infile, outfile);
     }
     else {
-        FILE *file = fopen(*infile, "rb+");
-
-        if (file == NULL) {
-            printf("File not found.\n");
-            return EXIT_FAILURE;
-        }
-
-        WavFile *wavFile = wavLoadFile(file);
-        if (wavFile == NULL) {
-            printf("Error occurred when trying to load WAV file, aborting.");
-            return EXIT_FAILURE;
-        }
-
-        //printf("format: %.4s, %.4s\n", wavFile.chunkID, wavFile.format);
-        //printf("ChunkSize: %d\n", wavFile.chunkSize);
-        //printf("Sample Rate: %dhz\n", wavFile.fmt.sampleRate);
-
-        fclose(file);
-
-        DecodedKCS decodedKCS = decode_kcs(
-            wavFile, config.baud, config.data_bits, config.stop_bits, 1, config.parity_mode, config.leader
-        );
-        ByteBuffer buf = decodedKCS.data;
-
-        //printf("Decoded Size: %d\n", buf.size);
-        if (config.consoleOutput) {
-            printf("%.*s\n", buf.size, buf.data);
-        }
-        else {
-            // save to outfile
-            FILE *f = fopen(*outfile, "wb");
-            fwrite(buf.data, buf.size, 1, f);
-            fclose(f);
-        }
-
-        printf("%d bytes decoded", buf.size);
-        if (config.parity_mode != PARITY_NONE) {
-            printf(", %d parity errors.", decodedKCS.parity_errors);
-        }
-        printf("\ndone\n");
-
-        wavFree(wavFile);
-        free(buf.data);
+        return cmdDecode(config, infile, outfile);
     }
 
     return EXIT_SUCCESS;
