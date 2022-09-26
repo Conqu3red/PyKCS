@@ -8,7 +8,7 @@
 //#define KCS_DEBUG
 //#define KCS_DEBUG_CYLES
 
-typedef struct {
+typedef struct FmtChunk {
     uint32_t chunkSize;
     uint16_t audioFormat;
     uint16_t numChannels;
@@ -18,16 +18,15 @@ typedef struct {
     uint16_t bitsPerSample;
 } FmtChunk;
 
-struct {
+struct ByteBuffer {
     size_t size;
     uint8_t *data;
 } typedef ByteBuffer; // equivilent to a data chunk
 
-typedef struct {
+typedef struct WavFile {
     uint32_t chunkSize;
     FmtChunk fmt;
-    size_t dataChunkCount;
-    ByteBuffer *dataChunks;
+    ByteBuffer data;
 } WavFile;
 
 #define READ_VAL(v) nread = fread(&v, sizeof(v), 1, file)
@@ -40,6 +39,15 @@ size_t fbytesleft(FILE *fp) {
     return end - cur;
 }
 
+void wavFree(WavFile *wavFile) {
+    if (wavFile != NULL) {
+        free(wavFile);
+        if (wavFile->data.data != NULL) {
+            free(wavFile->data.data);
+        }
+    }
+}
+
 WavFile *wavLoadFile(FILE *file) {
     WavFile *wavFile = malloc(sizeof(WavFile));
 
@@ -48,11 +56,26 @@ WavFile *wavLoadFile(FILE *file) {
 
     // header info
     READ_VAL(chunkID);
+    if (chunkID[0] != 'R' || chunkID[1] != 'I' || chunkID[2] != 'F' || chunkID[3] != 'F') {
+        printf("WAV Read Error: Expected chunk ID 'RIFF' but read '%.4s' instead.\n", chunkID);
+        wavFree(wavFile);
+        return NULL;
+    }
     READ_VAL(wavFile->chunkSize);
     READ_VAL(chunkID); // format
+    if (chunkID[0] != 'W' || chunkID[1] != 'A' || chunkID[2] != 'V' || chunkID[3] != 'E') {
+        printf("WAV Read Error: Expected chunk ID 'WAVE' but read '%.4s' instead.\n", chunkID);
+        wavFree(wavFile);
+        return NULL;
+    }
 
     // fmt chunk
     READ_VAL(chunkID);
+    if (chunkID[0] != 'f' || chunkID[1] != 'm' || chunkID[2] != 't' || chunkID[3] != ' ') {
+        printf("WAV Read Error: Expected chunk ID 'fmt ' but read '%.4s' instead.\n", chunkID);
+        wavFree(wavFile);
+        return NULL;
+    }
     READ_VAL(wavFile->fmt.chunkSize);
     READ_VAL(wavFile->fmt.audioFormat);
     //printf("wav audio format: %d\n", wavFile->fmt.audioFormat);
@@ -62,50 +85,47 @@ WavFile *wavLoadFile(FILE *file) {
     READ_VAL(wavFile->fmt.blockAlign);
     READ_VAL(wavFile->fmt.bitsPerSample);
 
-    wavFile->dataChunks = malloc(sizeof(ByteBuffer));
-    wavFile->dataChunkCount = 1;
-
 
     bool hadDataChunk = false;
     // data chunk
-    while (1) {
-        if (!fbytesleft(file)) {
-            break;
-        }
+    while (fbytesleft(file)) {
         READ_VAL(chunkID);
         //printf("Chunk: %.4s\n", chunkID);
-        
-        ByteBuffer *chunk = wavFile->dataChunks;
         uint32_t size = 0;
         READ_VAL(size);
         //printf("Size: %u\n", size);
         size_t bytes_left = fbytesleft(file);
         if (chunkID[0] != 'd' || chunkID[1] != 'a' || chunkID[2] != 't' || chunkID[3] != 'a') {
             if (size > bytes_left) {
-                printf("Wav Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", size, bytes_left);
-                break;
+                printf("WAV Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", size, bytes_left);
+                wavFree(wavFile);
+                return NULL;
             }
             else {
+                printf("Skipping sub-chunk '%.4s'\n", chunkID);
                 fseek(file, size, SEEK_CUR);
             }
             continue;
         }
-        chunk->size = (size_t)size;
-        wavFile->dataChunks[0].data = NULL;
+        wavFile->data.size = (size_t)size;
+        wavFile->data.data = NULL;
 
-        if (chunk->size > bytes_left) {
-            printf("Wav Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", chunk->size, bytes_left);
-            break;
+        if (wavFile->data.size > bytes_left) {
+            printf("WAV Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", wavFile->data.size, bytes_left);
+            wavFree(wavFile);
+            return NULL;
         }
 
-        chunk->data = malloc(chunk->size); // TODO: sanity checks
-        nread = fread(chunk->data, sizeof(uint8_t), chunk->size, file);
+        wavFile->data.data = malloc(wavFile->data.size); // TODO: sanity checks
+        nread = fread(wavFile->data.data, sizeof(uint8_t), wavFile->data.size, file);
         hadDataChunk = true;
         break;
     }
 
     if (!hadDataChunk) {
-        printf("No data chunk read!\n");
+        printf("WAV Read Error: Missing data sub-chunk\n");
+        wavFree(wavFile);
+        return NULL;
     }
     
     return wavFile;
@@ -114,12 +134,12 @@ WavFile *wavLoadFile(FILE *file) {
 uint8_t wavGetFrame(WavFile *wavFile, uint64_t index) {
     // BUG: no support for multi-byte resolutions / multiple channels
     uint16_t bytesPerSample = wavFile->fmt.bitsPerSample / 8;
-    if (index < wavFile->dataChunks[0].size) {
+    if (index < wavFile->data.size) {
         if (bytesPerSample == 2) {
             //uint16_t v = *(uint16_t*)(wavFile->dataChunks[0].data + (index * 2));
-            return wavFile->dataChunks[0].data[index * bytesPerSample + 1]; // most significant byte?
+            return wavFile->data.data[index * bytesPerSample + 1]; // most significant byte?
         }
-        return wavFile->dataChunks[0].data[index];
+        return wavFile->data.data[index];
     }
     printf("Error: Index exceeded end of Wav File data.\n");
     return 0;
@@ -127,16 +147,7 @@ uint8_t wavGetFrame(WavFile *wavFile, uint64_t index) {
 
 uint64_t wavGetNumFrames(WavFile *wavFile) {
     // TODO: better solution, maybe like a FILE* ?
-    return wavFile->dataChunks[0].size / (wavFile->fmt.bitsPerSample / 8);
-}
-
-void wavFree(WavFile *wavFile) {
-    // loop through data chunks and free them
-    for (size_t i = 0; i < wavFile->dataChunkCount; i++) {
-        free(wavFile->dataChunks[i].data);
-        free(wavFile->dataChunks + i);
-    }
-    free(wavFile);
+    return wavFile->data.size / (wavFile->fmt.bitsPerSample / 8);
 }
 
 enum {
@@ -171,7 +182,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
     const uint32_t threshold = 2 * cyclesPerBit;
 
     while (local_index < frame_window + threshold) {
-        if (((*frameIndex) + local_index) * (wavFile->fmt.bitsPerSample / 8) >= wavFile->dataChunks[0].size) {
+        if (((*frameIndex) + local_index) * (wavFile->fmt.bitsPerSample / 8) >= wavFile->data.size) {
             if (!peek) {
                 (*frameIndex) += local_index;
             }
@@ -413,6 +424,10 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
         }
 
         WavFile *wavFile = wavLoadFile(file);
+        if (wavFile == NULL) {
+            printf("Error occurred when trying to load WAV file, aborting.");
+            return EXIT_FAILURE;
+        }
 
         //printf("format: %.4s, %.4s\n", wavFile.chunkID, wavFile.format);
         //printf("ChunkSize: %d\n", wavFile.chunkSize);
@@ -442,7 +457,6 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
         }
         printf("\ndone\n");
 
-        free(buf.data);
         wavFree(wavFile);
     }
 
