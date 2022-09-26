@@ -379,8 +379,7 @@ DecodedKCS KCS_decode(
                 if (bit_count % 2 != 1)
                     parity_errors += 1;
             }
-
-            if (parity_mode == PARITY_EVEN) {
+            else if (parity_mode == PARITY_EVEN) {
                 bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
                 uint8_t bit_count = count_bits(num) + p;
                 if (bit_count % 2 != 0)
@@ -493,7 +492,7 @@ WavFile* KCS_encode(
             uint8_t bit_count = count_bits(num);
             write_bit(wavFile, cycles_per_bit, &frameIndex, bit_count % 2 == 0);
         }
-        if (parity_mode == PARITY_EVEN) {
+        else if (parity_mode == PARITY_EVEN) {
             uint8_t bit_count = count_bits(num);
             write_bit(wavFile, cycles_per_bit, &frameIndex, bit_count % 2 == 1);
         }
