@@ -22,12 +22,18 @@ typedef struct FmtChunk {
 struct ByteBuffer {
     size_t size;
     uint8_t *data;
-} typedef ByteBuffer; // equivilent to a data chunk
+} typedef ByteBuffer;
+
+struct DataChunk {
+    uint32_t size;
+    size_t allocSize;
+    uint8_t *data;
+} typedef DataChunk;
 
 typedef struct WavFile {
     uint32_t chunkSize;
     FmtChunk fmt;
-    ByteBuffer data;
+    DataChunk data;
 } WavFile;
 
 size_t fbytesleft(FILE *fp) {
@@ -57,6 +63,7 @@ WavFile* wavNewDefault() {
     wavFile->fmt.blockAlign = wavFile->fmt.numChannels * wavFile->fmt.bitsPerSample / 8;
 
     wavFile->data.size = 0;
+    wavFile->data.allocSize = 0;
     wavFile->data.data = malloc(0);
     return wavFile;
 }
@@ -122,17 +129,18 @@ WavFile *wavLoadFile(FILE *file) {
             }
             continue;
         }
-        wavFile->data.size = (size_t)size;
+        wavFile->data.size = size;
+        wavFile->data.allocSize = (size_t)size;
         wavFile->data.data = NULL;
 
-        if (wavFile->data.size > bytes_left) {
-            printf("WAV Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", wavFile->data.size, bytes_left);
+        if (wavFile->data.allocSize > bytes_left) {
+            printf("WAV Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", wavFile->data.allocSize, bytes_left);
             wavFree(wavFile);
             return NULL;
         }
 
-        wavFile->data.data = malloc(wavFile->data.size); // TODO: sanity checks
-        nread = fread(wavFile->data.data, sizeof(uint8_t), wavFile->data.size, file);
+        wavFile->data.data = malloc(wavFile->data.allocSize); // TODO: sanity checks
+        nread = fread(wavFile->data.data, sizeof(uint8_t), wavFile->data.allocSize, file);
         hadDataChunk = true;
         break;
     }
@@ -155,7 +163,7 @@ bool wavWriteFile(WavFile *wavFile, FILE* file) {
     // header info
     char riff[4] = {'R', 'I', 'F', 'F'};
     WRITE_VAL(riff);
-    wavFile->chunkSize = 4 + (8 + wavFile->fmt.chunkSize) + (8 + wavFile->data.size);
+    wavFile->chunkSize = 4 + (8 + wavFile->fmt.chunkSize) + (8 + wavFile->data.allocSize);
     WRITE_VAL(wavFile->chunkSize);
     char wave[4] = {'W', 'A', 'V', 'E'};
     WRITE_VAL(wave);
@@ -175,9 +183,11 @@ bool wavWriteFile(WavFile *wavFile, FILE* file) {
     // data sub-chunk
     char data[4] = {'d', 'a', 't', 'a'};
     WRITE_VAL(data);
-    uint32_t size = (uint32_t)wavFile->data.size;
+    uint32_t size = wavFile->data.size;
+    printf("%d %d\n", wavFile->data.size, wavFile->data.allocSize);
     WRITE_VAL(size);
     nwrite = fwrite(wavFile->data.data, 1, size, file);
+    printf("%d\n", nwrite);
 
     return true;
 }
@@ -199,11 +209,17 @@ uint8_t wavGetFrame(WavFile *wavFile, size_t index) {
 }
 
 void wavSetFrame(WavFile *wavFile, size_t index, uint8_t value) {
-    uint16_t bytesPerSample = wavFile->fmt.bitsPerSample / 8;
-    if (index * bytesPerSample + (bytesPerSample - 1) >= wavFile->data.size) {
-        wavFile->data.size += 1024;
-        wavFile->data.data = realloc(wavFile->data.data, wavFile->data.size);
-        memset(wavFile->data.data + wavFile->data.size - 1024, 0, 1024);
+    uint32_t bytesPerSample = wavFile->fmt.bitsPerSample / 8;
+    size_t furthest_index = index * bytesPerSample + (bytesPerSample - 1);
+    if (index >= wavFile->data.size / bytesPerSample) {
+        wavFile->data.size = (index + 1) * bytesPerSample;
+    }
+    if (furthest_index >= wavFile->data.allocSize) {
+        wavFile->data.allocSize += 1024;
+        wavFile->data.data = realloc(wavFile->data.data, wavFile->data.allocSize);
+        for (size_t i = wavFile->data.allocSize - 1024; i < wavFile->data.allocSize; i++) {
+            wavFile->data.data[i] = 0;
+        }
     }
     if (bytesPerSample == 2) {
         //uint16_t v = *(uint16_t*)(wavFile->dataChunks[0].data + (index * 2));
@@ -214,7 +230,7 @@ void wavSetFrame(WavFile *wavFile, size_t index, uint8_t value) {
 
 uint64_t wavGetNumFrames(WavFile *wavFile) {
     // TODO: better solution, maybe like a FILE* ?
-    return wavFile->data.size / (wavFile->fmt.bitsPerSample / 8);
+    return wavFile->data.allocSize / (wavFile->fmt.bitsPerSample / 8);
 }
 
 enum {
@@ -249,7 +265,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
     const uint32_t threshold = (wavFile->fmt.sampleRate / 22050) * 2 * cyclesPerBit;
 
     while (local_index < frame_window + threshold) {
-        if (((*frameIndex) + local_index) * (wavFile->fmt.bitsPerSample / 8) >= wavFile->data.size) {
+        if (((*frameIndex) + local_index) * (wavFile->fmt.bitsPerSample / 8) >= wavFile->data.allocSize) {
             if (!peek) {
                 (*frameIndex) += local_index;
             }
@@ -391,9 +407,10 @@ DecodedKCS KCS_decode(
     return decoded;
 }
 
-void write_cycle(WavFile *wavFile, uint64_t *frameIndex, bool value) {
+void write_cycle(WavFile *wavFile, uint64_t *frameIndex, bool value, double intensity) {
     const uint16_t CENTER = 128;
-    const uint16_t AMPLITUDE = 256;
+    uint16_t AMPLITUDE = (uint16_t)(256.0*intensity);
+    if (AMPLITUDE >= 256) AMPLITUDE = 255;
 
     uint32_t cycle_length;
     
@@ -415,7 +432,7 @@ void write_cycle(WavFile *wavFile, uint64_t *frameIndex, bool value) {
 
 void write_bit(WavFile *wavFile, uint16_t cycles_per_bit, uint64_t *frameIndex, bool value) {
     for (int i = 0; i < (value ? (cycles_per_bit * 2) : cycles_per_bit); i++) {
-        write_cycle(wavFile, frameIndex, value);
+        write_cycle(wavFile, frameIndex, value, 1.0);
     }
 }
 
@@ -433,7 +450,7 @@ WavFile* KCS_encode(
     // leader
     if (leader > 0) {
         while (frameIndex < wavFile->fmt.sampleRate * (uint32_t)leader) {
-            write_bit(wavFile, 1, &frameIndex, 1);
+            write_cycle(wavFile, &frameIndex, 1, 0.5);
         }
     }
 
@@ -458,6 +475,16 @@ WavFile* KCS_encode(
             write_bit(wavFile, cycles_per_bit, &frameIndex, 1);
         }
     }
+
+    // "leader" but after
+    if (leader > 0) {
+        uint64_t begin = frameIndex;
+        while (frameIndex - begin < wavFile->fmt.sampleRate * (uint32_t)leader) {
+            write_cycle(wavFile, &frameIndex, 1, 0.5);
+        }
+    }
+
+    // trim wav file down to remove excess wave data
 
     return wavFile;
 }
