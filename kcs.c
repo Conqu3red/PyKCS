@@ -179,7 +179,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
     uint64_t local_index = 0;
     uint32_t cLength = 0;
 
-    const uint32_t threshold = 2 * cyclesPerBit;
+    const uint32_t threshold = (wavFile->fmt.sampleRate / 22050) * 2 * cyclesPerBit;
 
     while (local_index < frame_window + threshold) {
         if (((*frameIndex) + local_index) * (wavFile->fmt.bitsPerSample / 8) >= wavFile->data.size) {
@@ -246,79 +246,74 @@ DecodedKCS decode_kcs(
 
     bool complete = false;
 
-    if (wavFile->fmt.sampleRate != 22050) {
-        printf("Currently only 22050hz is supported.\n");
+    while (get_bit(wavFile, 1, &frameIndex, true)) {
+        get_bit(wavFile, 1, &frameIndex, false);
     }
-    else {
-        while (get_bit(wavFile, 1, &frameIndex, true)) {
-            get_bit(wavFile, 1, &frameIndex, false);
+    printf("Leader done.\n");
+
+    while (frameIndex < frames) {
+        if (bits_done == 0) {
+            for (uint16_t i = 0; i < start_bits; i++) {
+                bool start_bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                if (start_bit) {
+                    printf("Start bit was 1, reached end of input.\n");
+                    complete = true;
+                    break;
+                }
+            }
+            #ifdef KCS_DEBUG_CYLES
+            printf("<start bit done>\n");
+            #endif
         }
-        printf("Leader done.\n");
+        if (complete) break;
 
-        while (frameIndex < frames) {
-            if (bits_done == 0) {
-                for (uint16_t i = 0; i < start_bits; i++) {
-                    bool start_bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
-                    if (start_bit) {
-                        printf("Start bit was 1, reached end of input.\n");
-                        complete = true;
-                        break;
-                    }
-                }
-                #ifdef KCS_DEBUG_CYLES
-                printf("<start bit done>\n");
-                #endif
+        bool bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+        num += bit << bits_done;
+
+        bits_done += 1;
+
+        if (bits_done == data_bits) {
+            buffer.data[byteIndex] = num;
+            byteIndex += 1;
+
+            // handle if buffer is full
+            if (byteIndex >= buffer.size) {
+                buffer.size += 1024;
+                buffer.data = realloc(buffer.data, buffer.size);
             }
-            if (complete) break;
 
-            bool bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
-            num += bit << bits_done;
+            #ifdef KCS_DEBUG_CYLES
+            printf("<parity+stop>\n");
+            #endif
 
-            bits_done += 1;
-
-            if (bits_done == data_bits) {
-                buffer.data[byteIndex] = num;
-                byteIndex += 1;
-
-                // handle if buffer is full
-                if (byteIndex >= buffer.size) {
-                    buffer.size += 1024;
-                    buffer.data = realloc(buffer.data, buffer.size);
-                }
-
-                #ifdef KCS_DEBUG_CYLES
-                printf("<parity+stop>\n");
-                #endif
-
-                // parity checks
-                if (parity_mode == PARITY_ODD) {
-                    bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
-                    uint8_t bit_count = count_bits(num) + p;
-                    if (bit_count % 2 != 1)
-                        parity_errors += 1;
-                }
-
-                if (parity_mode == PARITY_EVEN) {
-                    bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
-                    uint8_t bit_count = count_bits(num) + p;
-                    if (bit_count % 2 != 0)
-                        parity_errors += 1;
-                }
-
-                num = 0;
-                bits_done = 0;
-
-                for (uint8_t i = 0; i < stop_bits; i++) {
-                    bool stopBit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
-                    if (!stopBit) {
-                        printf("ERROR: stop bit is 0\n");
-                    }
-                }
-
-                #ifdef KCS_DEBUG_CYLES
-                printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
-                #endif
+            // parity checks
+            if (parity_mode == PARITY_ODD) {
+                bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                uint8_t bit_count = count_bits(num) + p;
+                if (bit_count % 2 != 1)
+                    parity_errors += 1;
             }
+
+            if (parity_mode == PARITY_EVEN) {
+                bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                uint8_t bit_count = count_bits(num) + p;
+                if (bit_count % 2 != 0)
+                    parity_errors += 1;
+            }
+
+            num = 0;
+            bits_done = 0;
+
+            for (uint8_t i = 0; i < stop_bits; i++) {
+                bool stopBit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                if (!stopBit) {
+                    printf("ERROR: stop bit is 0\n");
+                }
+            }
+
+            #ifdef KCS_DEBUG_CYLES
+            printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
+            #endif
         }
     }
     // resize buffer to actual size
@@ -351,7 +346,7 @@ const char *info = "KCS Version 0.1  21-Nov-2021\n"
 "-M  make wavefile        -S  1 stop bit\n"
 "Default: decode WAV file, 300 baud, 8 data, 2 stop bits, no parity\n\n"
 "Conversion utility for Kansas City Standard tapes.\n"
-"Accepts 8-bit mono WAV wavefiles at 22,050 samples per second\n"
+"Accepts 8/16-bit mono WAV wavefiles at 22,050 or 44,100 samples per second.\n"
 "Written by Conqu3red.";
 
 bool prefix(const char *pre, const char *str)
@@ -458,6 +453,7 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
         printf("\ndone\n");
 
         wavFree(wavFile);
+        free(buf.data);
     }
 
     return EXIT_SUCCESS;
