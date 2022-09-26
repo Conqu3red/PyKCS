@@ -68,6 +68,11 @@ WavFile* wavNewDefault() {
     return wavFile;
 }
 
+void wavAllocateData(WavFile *wavFile, size_t size) {
+    wavFile->data.data = realloc(wavFile->data.data, size);
+    wavFile->data.allocSize = size;
+}
+
 #define READ_VAL(v) nread = fread(&v, sizeof(v), 1, file)
 
 WavFile *wavLoadFile(FILE *file) {
@@ -184,10 +189,8 @@ bool wavWriteFile(WavFile *wavFile, FILE* file) {
     char data[4] = {'d', 'a', 't', 'a'};
     WRITE_VAL(data);
     uint32_t size = wavFile->data.size;
-    printf("%d %d\n", wavFile->data.size, wavFile->data.allocSize);
     WRITE_VAL(size);
     nwrite = fwrite(wavFile->data.data, 1, size, file);
-    printf("%d\n", nwrite);
 
     return true;
 }
@@ -230,7 +233,7 @@ void wavSetFrame(WavFile *wavFile, size_t index, uint8_t value) {
 
 uint64_t wavGetNumFrames(WavFile *wavFile) {
     // TODO: better solution, maybe like a FILE* ?
-    return wavFile->data.allocSize / (wavFile->fmt.bitsPerSample / 8);
+    return wavFile->data.size / (wavFile->fmt.bitsPerSample / 8);
 }
 
 enum {
@@ -436,6 +439,23 @@ void write_bit(WavFile *wavFile, uint16_t cycles_per_bit, uint64_t *frameIndex, 
     }
 }
 
+size_t KCS_estimate_wav_size(
+    ByteBuffer data,
+    uint32_t baud, uint8_t data_bits, uint8_t stop_bits,
+    uint8_t start_bits, ParityMode parity_mode, uint16_t leader
+) {
+    size_t sampleRate = 22050; // default
+    // assumes 8-bit mono wav file
+    uint16_t cycles_per_bit = 1200 / baud;
+    uint32_t samplesPerBit = (uint32_t)((double)sampleRate / BASE_FREQ * 2);
+    uint32_t bitsPerByte = start_bits + data_bits + (parity_mode == PARITY_NONE ? 0 : 1) + stop_bits;
+
+    size_t size = sampleRate * (uint32_t)leader * 2
+        + data.size * bitsPerByte * cycles_per_bit * samplesPerBit;
+
+    return size;
+}
+
 WavFile* KCS_encode(
     ByteBuffer data,
     uint32_t baud, uint8_t data_bits, uint8_t stop_bits,
@@ -443,6 +463,7 @@ WavFile* KCS_encode(
 ) {
     uint16_t cycles_per_bit = 1200 / baud;
     WavFile* wavFile = wavNewDefault();
+    wavAllocateData(wavFile, KCS_estimate_wav_size(data, baud, data_bits, stop_bits, start_bits, parity_mode, leader));
 
     uint64_t frameIndex = 0;
 
@@ -565,10 +586,14 @@ int cmdEncode(KCS_Config config, char * *infile, char * *outfile) {
     buf.data = malloc(buf.size);
     fread(buf.data, 1, buf.size, file);
 
+    clock_t start = clock();
+
     WavFile *wavFile = KCS_encode(
         buf, config.baud, config.data_bits, config.stop_bits,
         config.start_bits, config.parity_mode, config.leader
     );
+
+    clock_t end = clock();
 
     // TODO: handle NULL wavFile
 
@@ -576,9 +601,11 @@ int cmdEncode(KCS_Config config, char * *infile, char * *outfile) {
     wavWriteFile(wavFile, f);
     fclose(f);
 
+    printf("%d bytes encoded", buf.size);
+    printf("\ndone in %.3fs\n", (double)(end - start) / CLOCKS_PER_SEC);
+
     free(buf.data);
     wavFree(wavFile);
-    
     
     return EXIT_SUCCESS;
 }
