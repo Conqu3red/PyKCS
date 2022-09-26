@@ -5,6 +5,9 @@
 #include <math.h>
 #include <string.h>
 
+//#define KCS_DEBUG
+//#define KCS_DEBUG_CYLES
+
 typedef struct {
     uint32_t chunkSize;
     uint16_t audioFormat;
@@ -160,9 +163,10 @@ const uint32_t BASE_FREQ = 2400; // represents a 1
 
 bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool peek) {
     uint32_t frame_window = (uint32_t)round((((double)wavFile->fmt.sampleRate)*cyclesPerBit*2)/(double)BASE_FREQ);
-    
+
     uint32_t cycles = 0;
     uint64_t local_index = 0;
+    uint32_t cLength = 0;
 
     const uint32_t threshold = 2 * cyclesPerBit;
 
@@ -176,9 +180,13 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
         
         uint8_t x = wavGetFrame(wavFile, (*frameIndex) + local_index);
         local_index++;
+        cLength++;
 
-        if ((getBitPrev >> 7) != (x >> 7)) {
-            //printf("%d ", cLength);
+        if ((getBitPrev >> 7) != (x >> 7) && local_index > 1) {
+            #ifdef KCS_DEBUG_CYLES
+            printf("%d ", cLength);
+            #endif
+            cLength = 0;
             cycles += 1;
         }
 
@@ -191,7 +199,9 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool 
         }
     }
 
-    //printf("\nCycles: %d\n", cycles);
+    #ifdef KCS_DEBUG_CYLES
+    printf("Cycles: %d, %d\n", cycles, local_index);
+    #endif
 
     if (!peek) {
         (*frameIndex) += local_index;
@@ -244,7 +254,9 @@ DecodedKCS decode_kcs(
                         break;
                     }
                 }
-                //printf("<start bit done>\n");
+                #ifdef KCS_DEBUG_CYLES
+                printf("<start bit done>\n");
+                #endif
             }
             if (complete) break;
 
@@ -263,7 +275,9 @@ DecodedKCS decode_kcs(
                     buffer.data = realloc(buffer.data, buffer.size);
                 }
 
-                //printf("<parity+stop>\n");
+                #ifdef KCS_DEBUG_CYLES
+                printf("<parity+stop>\n");
+                #endif
 
                 // parity checks
                 if (parity_mode == PARITY_ODD) {
@@ -290,7 +304,9 @@ DecodedKCS decode_kcs(
                     }
                 }
 
-                //printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
+                #ifdef KCS_DEBUG_CYLES
+                printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
+                #endif
             }
         }
     }
