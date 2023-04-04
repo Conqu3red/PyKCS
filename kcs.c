@@ -5,7 +5,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
-#include <bpf.h>
+#include "bpf.h"
 
 //#define KCS_DEBUG
 //#define KCS_DEBUG_CYCLES
@@ -286,6 +286,13 @@ uint8_t count_bits(uint8_t num) {
          + ((num >> 7) & 1);
 }
 
+
+
+
+/* BEGIN KCS IMPL */
+
+
+
 const uint32_t BASE_FREQ = 2400; // represents a 1
 const double DIFFERENCE_EPSILON = 0.05; // TODO: decide best value for this
 
@@ -302,12 +309,12 @@ int KCS_sample_evaluate(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf_high
     return high >= low ? 1 : -1;
 }
 
-typedef struct bpf_half_cycle {
+typedef struct half_cycle {
     int sign;
     int length;
-} bpf_half_cycle;
+} half_cycle;
 
-bpf_half_cycle KCS_bpf_cycle(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf_high, biquad *bpf_low) {
+half_cycle KCS_half_cycle(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf_high, biquad *bpf_low) {
     int length = 0;
     int val = 0;
     while (val == 0 && wavIndexValid(wavFile, *frameIndex)) {
@@ -315,12 +322,6 @@ bpf_half_cycle KCS_bpf_cycle(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf
         (*frameIndex)++;
         length++;
     }
-    //int val = KCS_sample_evaluate(wavFile, frameIndex, bpf_high, bpf_low);
-    //if (val == 0) printf("DBG CONSUME 0 @ %llu\n", *frameIndex);
-    //(*frameIndex)++;
-    //int length = 1;
-
-    // swallow zeros
 
     while (wavIndexValid(wavFile, *frameIndex)) {
         int v = KCS_sample_evaluate(wavFile, frameIndex, bpf_high, bpf_low);
@@ -330,18 +331,18 @@ bpf_half_cycle KCS_bpf_cycle(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf
         length++;
     }
     //printf("BPF Cycle: %d len %d\n", val, length);
-    bpf_half_cycle c;
+    half_cycle c;
     c.sign =  val;
     c.length = length;
     return c;
 }
 
-bpf_half_cycle KCS_read_leader(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf_high, biquad *bpf_low) {
+half_cycle KCS_read_leader(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf_high, biquad *bpf_low) {
     double short_half = 0.5 * wavFile->fmt.sampleRate / 2400.0;
     uint64_t total_length = 0;
     uint64_t count = 0;
     while (wavIndexValid(wavFile, *frameIndex)) {
-        bpf_half_cycle hc = KCS_bpf_cycle(wavFile, frameIndex, bpf_high, bpf_low);
+        half_cycle hc = KCS_half_cycle(wavFile, frameIndex, bpf_high, bpf_low);
         double old_avg = (double)total_length / (double)count;
         
         // include threshold (play with values a bit)
@@ -366,7 +367,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, biqua
     int count = 0;
     int length = 0;
     for (uint8_t i = 0; i < cyclesPerBit * 2; i++) {
-        bpf_half_cycle hc = KCS_bpf_cycle(wavFile, frameIndex, bpf_high, bpf_low);
+        half_cycle hc = KCS_half_cycle(wavFile, frameIndex, bpf_high, bpf_low);
         count++;
         length += hc.length;
         //printf("hc %d %d\n", hc.sign, hc.length);
@@ -378,7 +379,7 @@ bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, biqua
 
     // finish rest because short cycles
     for (uint8_t i = 0; i < cyclesPerBit * 2; i++) {
-        bpf_half_cycle hc = KCS_bpf_cycle(wavFile, frameIndex, bpf_high, bpf_low);
+        half_cycle hc = KCS_half_cycle(wavFile, frameIndex, bpf_high, bpf_low);
         count++;
         length += hc.length;
     }
@@ -424,7 +425,7 @@ DecodedKCS KCS_decode(
     while (KCS_sample_evaluate(wavFile, &frameIndex, bpf_high, bpf_low) == 0) frameIndex++;
     //frameIndex--;
     printf("Leader begin @ %d\n", frameIndex);
-    bpf_half_cycle first_half_cycle = KCS_read_leader(wavFile, &frameIndex, bpf_high, bpf_low);
+    half_cycle first_half_cycle = KCS_read_leader(wavFile, &frameIndex, bpf_high, bpf_low);
     // FIXME: read_leader reads one half_cycle too much; we need to account for this!
     printf("Leader done.\n");
 
