@@ -1,13 +1,14 @@
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <stdbool.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#include <stdlib.h>
+#include <bpf.h>
 
 //#define KCS_DEBUG
-//#define KCS_DEBUG_CYLES
+//#define KCS_DEBUG_CYCLES
 
 typedef struct FmtChunk {
     uint32_t chunkSize;
@@ -197,13 +198,46 @@ bool wavWriteFile(WavFile *wavFile, FILE* file) {
 
 #undef WRITE_VAL
 
+uint64_t wavGetNumFrames(WavFile *wavFile) {
+    // TODO: better solution, maybe like a FILE* ?
+    return wavFile->data.size / (wavFile->fmt.bitsPerSample / 8);
+}
+
+bool wavIndexValid(WavFile *wavFile, size_t index) {
+    return index * wavFile->fmt.numChannels * wavFile->fmt.bitsPerSample / 8 < wavFile->data.size;
+}
+
 uint8_t wavGetFrame(WavFile *wavFile, size_t index) {
     // BUG: no support for multi-byte resolutions / multiple channels
+    if (!wavIndexValid(wavFile, index)) {
+        printf("WAV ERR: out of bounds\n");
+        return 127;
+    }
+    index *= wavFile->fmt.numChannels;
     uint16_t bytesPerSample = wavFile->fmt.bitsPerSample / 8;
     if (index < wavFile->data.size) {
-        if (bytesPerSample == 2) {
-            //uint16_t v = *(uint16_t*)(wavFile->dataChunks[0].data + (index * 2));
-            return wavFile->data.data[index * bytesPerSample + 1]; // most significant byte?
+        switch (wavFile->fmt.bitsPerSample) {
+            case 8: // unsigned byte
+                return wavFile->data.data[index];
+            
+            case 16:; // two's compliment, little endian
+                uint8_t ms_byte = wavFile->data.data[index * bytesPerSample + 1];
+                uint8_t ls_byte = wavFile->data.data[index * bytesPerSample];
+                //return ms_byte;
+                int32_t combined = (ms_byte << 8) + ls_byte;
+                if (combined > 0x7FFF) {
+                    combined = combined - 0xFFFF - 1;
+                }
+                //printf("F %d\n", combined);
+                //return (2 * (float)combined / (float)0xFFFF) - 1.0;
+                return (combined / 512) + 128;
+            
+            case 32: // float
+                // TODO
+                break;
+            
+            default:
+                break;
         }
         return wavFile->data.data[index];
     }
@@ -226,14 +260,11 @@ void wavSetFrame(WavFile *wavFile, size_t index, uint8_t value) {
     }
     if (bytesPerSample == 2) {
         //uint16_t v = *(uint16_t*)(wavFile->dataChunks[0].data + (index * 2));
+        wavFile->data.data[index * bytesPerSample] = 0;
         wavFile->data.data[index * bytesPerSample + 1] = value; // most significant byte?
+        return;
     }
     wavFile->data.data[index] = value;
-}
-
-uint64_t wavGetNumFrames(WavFile *wavFile) {
-    // TODO: better solution, maybe like a FILE* ?
-    return wavFile->data.size / (wavFile->fmt.bitsPerSample / 8);
 }
 
 enum {
@@ -255,55 +286,109 @@ uint8_t count_bits(uint8_t num) {
          + ((num >> 7) & 1);
 }
 
-static uint8_t getBitPrev = 0;
 const uint32_t BASE_FREQ = 2400; // represents a 1
+const double DIFFERENCE_EPSILON = 0.05; // TODO: decide best value for this
 
-bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, bool peek) {
-    uint32_t frame_window = (uint32_t)round((((double)wavFile->fmt.sampleRate)*cyclesPerBit*2)/(double)BASE_FREQ);
+int KCS_sample_evaluate(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf_high, biquad *bpf_low) {
+    // FIXME: getFrame should return a double probably
+    int32_t isample = (int32_t)wavGetFrame(wavFile, *frameIndex);
+    double sample = ((2 * isample) / 255.0) - 1.0;
+    //if (sample != 0) printf("%llu %f\n", *frameIndex, sample);
+    double high = BiQuad(sample, bpf_high);
+    double low = BiQuad(sample, bpf_low);
+    if (fabs(high - low) < DIFFERENCE_EPSILON) {
+        return 0;
+    }
+    return high >= low ? 1 : -1;
+}
 
-    uint32_t cycles = 0;
-    uint64_t local_index = 0;
-    uint32_t cLength = 0;
+typedef struct bpf_half_cycle {
+    int sign;
+    int length;
+} bpf_half_cycle;
 
-    const uint32_t threshold = (wavFile->fmt.sampleRate / 22050) * 2 * cyclesPerBit;
+bpf_half_cycle KCS_bpf_cycle(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf_high, biquad *bpf_low) {
+    int length = 0;
+    int val = 0;
+    while (val == 0 && wavIndexValid(wavFile, *frameIndex)) {
+        val = KCS_sample_evaluate(wavFile, frameIndex, bpf_high, bpf_low);
+        (*frameIndex)++;
+        length++;
+    }
+    //int val = KCS_sample_evaluate(wavFile, frameIndex, bpf_high, bpf_low);
+    //if (val == 0) printf("DBG CONSUME 0 @ %llu\n", *frameIndex);
+    //(*frameIndex)++;
+    //int length = 1;
 
-    while (local_index < frame_window + threshold) {
-        if (((*frameIndex) + local_index) * (wavFile->fmt.bitsPerSample / 8) >= wavFile->data.allocSize) {
-            if (!peek) {
-                (*frameIndex) += local_index;
-            }
-            break; // end of data
+    // swallow zeros
+
+    while (wavIndexValid(wavFile, *frameIndex)) {
+        int v = KCS_sample_evaluate(wavFile, frameIndex, bpf_high, bpf_low);
+        // Swallow 0
+        if (v != val) break;
+        (*frameIndex)++;
+        length++;
+    }
+    //printf("BPF Cycle: %d len %d\n", val, length);
+    bpf_half_cycle c;
+    c.sign =  val;
+    c.length = length;
+    return c;
+}
+
+bpf_half_cycle KCS_read_leader(WavFile *wavFile, uint64_t *frameIndex, biquad *bpf_high, biquad *bpf_low) {
+    double short_half = 0.5 * wavFile->fmt.sampleRate / 2400.0;
+    uint64_t total_length = 0;
+    uint64_t count = 0;
+    while (wavIndexValid(wavFile, *frameIndex)) {
+        bpf_half_cycle hc = KCS_bpf_cycle(wavFile, frameIndex, bpf_high, bpf_low);
+        double old_avg = (double)total_length / (double)count;
+        
+        // include threshold (play with values a bit)
+        if (count > 100 && hc.sign == 1 && hc.length > short_half * 1.5) {
+            printf("Long HC %d @ %llu, len %d\n", hc.sign, *frameIndex, hc.length);
+            return hc;
         }
         
-        uint8_t x = wavGetFrame(wavFile, (*frameIndex) + local_index);
-        local_index++;
-        cLength++;
+        total_length += hc.length;
+        count++;
+        //printf("Average: %d %f\n", count, (double)total_length / (double)count);
+        
+    }
+}
 
-        if ((getBitPrev >> 7) != (x >> 7) && local_index > 1) {
-            #ifdef KCS_DEBUG_CYLES
-            printf("%d ", cLength);
-            #endif
-            cLength = 0;
-            cycles += 1;
-        }
+bool get_bit(WavFile *wavFile, uint8_t cyclesPerBit, uint64_t *frameIndex, biquad* bpf_high, biquad *bpf_low) {
+    uint32_t frame_window = (uint32_t)round((((double)wavFile->fmt.sampleRate)*cyclesPerBit*2)/(double)BASE_FREQ);
 
-        getBitPrev = x;
+    double short_cycle = wavFile->fmt.sampleRate / 2400.0;
+    double long_cycle = wavFile->fmt.sampleRate / 1200.0;
 
-        if (cycles == cyclesPerBit * 4) {
-            break;
-        } else if (local_index >= frame_window - threshold && cycles == cyclesPerBit * 2) {
-            break;
-        }
+    int count = 0;
+    int length = 0;
+    for (uint8_t i = 0; i < cyclesPerBit * 2; i++) {
+        bpf_half_cycle hc = KCS_bpf_cycle(wavFile, frameIndex, bpf_high, bpf_low);
+        count++;
+        length += hc.length;
+        //printf("hc %d %d\n", hc.sign, hc.length);
+    }
+    //printf("%d\n", length);
+    if (length > 0.75 * long_cycle * cyclesPerBit) {
+        return false;
     }
 
-    #ifdef KCS_DEBUG_CYLES
-    printf("Cycles: %d, %d\n", cycles, local_index);
-    #endif
-
-    if (!peek) {
-        (*frameIndex) += local_index;
+    // finish rest because short cycles
+    for (uint8_t i = 0; i < cyclesPerBit * 2; i++) {
+        bpf_half_cycle hc = KCS_bpf_cycle(wavFile, frameIndex, bpf_high, bpf_low);
+        count++;
+        length += hc.length;
     }
-    return cycles >= cyclesPerBit * 3;
+
+    if (length > 0.75 * short_cycle * cyclesPerBit * 2) {
+        return true;
+    }
+
+    //printf("INVALID");
+    return true;
 }
 
 struct {
@@ -327,33 +412,40 @@ DecodedKCS KCS_decode(
     uint8_t bits_done;
     uint8_t num;
 
-    uint64_t frames = wavGetNumFrames(wavFile);
+    uint64_t frames = wavGetNumFrames(wavFile) / wavFile->fmt.numChannels;
     uint64_t frameIndex = 0;
 
     bool complete = false;
 
-    while (get_bit(wavFile, 1, &frameIndex, true)) {
-        get_bit(wavFile, 1, &frameIndex, false);
-    }
+    // TODO: don't hard code frequencies here
+    biquad *bpf_high = BiQuad_new_BPF(2400, wavFile->fmt.sampleRate, 1.0);
+    biquad *bpf_low = BiQuad_new_BPF(1200, wavFile->fmt.sampleRate, 1.0);
+
+    while (KCS_sample_evaluate(wavFile, &frameIndex, bpf_high, bpf_low) == 0) frameIndex++;
+    //frameIndex--;
+    printf("Leader begin @ %d\n", frameIndex);
+    bpf_half_cycle first_half_cycle = KCS_read_leader(wavFile, &frameIndex, bpf_high, bpf_low);
+    // FIXME: read_leader reads one half_cycle too much; we need to account for this!
     printf("Leader done.\n");
 
     while (frameIndex < frames) {
         if (bits_done == 0) {
             for (uint16_t i = 0; i < start_bits; i++) {
-                bool start_bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                bool start_bit = get_bit(wavFile, cycles_per_bit, &frameIndex, bpf_high, bpf_low);
                 if (start_bit) {
-                    printf("Start bit was 1, reached end of input.\n");
+                    printf("Start bit was 1 at frame %d, reached end of input.\n", frameIndex);
                     complete = true;
                     break;
                 }
             }
-            #ifdef KCS_DEBUG_CYLES
+            #ifdef KCS_DEBUG_CYCLES
             printf("<start bit done>\n");
             #endif
+            //printf("BEGIN BYTE %llu @ %llu\n", byteIndex, frameIndex);
         }
         if (complete) break;
 
-        bool bit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+        bool bit = get_bit(wavFile, cycles_per_bit, &frameIndex, bpf_high, bpf_low);
         num += bit << bits_done;
 
         bits_done += 1;
@@ -368,19 +460,19 @@ DecodedKCS KCS_decode(
                 buffer.data = realloc(buffer.data, buffer.size);
             }
 
-            #ifdef KCS_DEBUG_CYLES
+            #ifdef KCS_DEBUG_CYCLES
             printf("<parity+stop>\n");
             #endif
 
             // parity checks
             if (parity_mode == PARITY_ODD) {
-                bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, bpf_high, bpf_low);
                 uint8_t bit_count = count_bits(num) + p;
                 if (bit_count % 2 != 1)
                     parity_errors += 1;
             }
             else if (parity_mode == PARITY_EVEN) {
-                bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                bool p = get_bit(wavFile, cycles_per_bit, &frameIndex, bpf_high, bpf_low);
                 uint8_t bit_count = count_bits(num) + p;
                 if (bit_count % 2 != 0)
                     parity_errors += 1;
@@ -390,13 +482,13 @@ DecodedKCS KCS_decode(
             bits_done = 0;
 
             for (uint8_t i = 0; i < stop_bits; i++) {
-                bool stopBit = get_bit(wavFile, cycles_per_bit, &frameIndex, false);
+                bool stopBit = get_bit(wavFile, cycles_per_bit, &frameIndex, bpf_high, bpf_low);
                 if (!stopBit) {
-                    printf("ERROR: stop bit is 0\n");
+                    printf("ERROR: stop bit is 0 @ %d\n", frameIndex);
                 }
             }
 
-            #ifdef KCS_DEBUG_CYLES
+            #ifdef KCS_DEBUG_CYCLES
             printf("BYTE: %d\n", buffer.data[byteIndex - 1]);
             #endif
         }
@@ -409,26 +501,20 @@ DecodedKCS KCS_decode(
     return decoded;
 }
 
+const uint8_t CYCLE_SHAPE_LONG[18] = {155,193,217,232,242,249,252,255,160,100,62,38,23,13,6,3,0,95};
+const uint8_t CYCLE_SHAPE_SHORT[9] = {157,220,245,255,151,85,43,17,0};
+
 void write_cycle(WavFile *wavFile, uint64_t *frameIndex, bool value, double intensity) {
-    const uint16_t CENTER = 128;
-    uint16_t AMPLITUDE = (uint16_t)(256.0*intensity);
-    if (AMPLITUDE >= 256) AMPLITUDE = 255;
-
-    uint32_t cycle_length;
-    
     if (value) {
-        // short cycle
-        cycle_length = (uint32_t)((double)wavFile->fmt.sampleRate / BASE_FREQ);
-
+        for (int i = 0; i < 9; i++) {
+            wavSetFrame(wavFile, *frameIndex, CYCLE_SHAPE_SHORT[i]);
+            (*frameIndex)++;
+        }
     } else {
-        // long cycle
-        cycle_length = (uint32_t)((double)wavFile->fmt.sampleRate / BASE_FREQ * 2);
-    }
-
-    const uint32_t halfway = cycle_length / 2;
-    for (int i = 0; i < cycle_length; i++) {
-        wavSetFrame(wavFile, *frameIndex, i < halfway ? (CENTER+AMPLITUDE/2) : (CENTER-AMPLITUDE/2));
-        (*frameIndex)++;
+        for (int i = 0; i < 18; i++) {
+            wavSetFrame(wavFile, *frameIndex, CYCLE_SHAPE_LONG[i]);
+            (*frameIndex)++;
+        }
     }
 }
 
@@ -544,7 +630,7 @@ int cmdDecode(KCS_Config config, char * *infile, char * *outfile) {
 
     //printf("format: %.4s, %.4s\n", wavFile.chunkID, wavFile.format);
     //printf("ChunkSize: %d\n", wavFile.chunkSize);
-    //printf("Sample Rate: %dhz\n", wavFile.fmt.sampleRate);
+    printf("Sample Rate: %dhz\n", wavFile->fmt.sampleRate);
 
     fclose(file);
 
@@ -706,7 +792,7 @@ int main(int argc, const char *const argv[]) {
         return EXIT_SUCCESS;
     }
 
-    KCS_Config config = {300, 8, 2, 1, PARITY_NONE, 0, false, false};
+    KCS_Config config = {300, 8, 2, 1, PARITY_NONE, 1, false, false};
     
     char *infile = NULL;
     char *outfile = NULL;
