@@ -703,7 +703,7 @@ int cmdEncode(KCS_Config config, char * *infile, char * *outfile) {
     return EXIT_SUCCESS;
 }
 
-const char *info = "KCS Version 0.1  21-Nov-2021\n"
+const char *info = "KCS Version 0.2  04-Apr-2023\n"
 "Use: KCS [options] infile [outfile]\n\n"
 "-Bn baud  1=600 2=1200   -O  odd parity\n"
 "-Ln leader (sec)         -E  even parity\n"
