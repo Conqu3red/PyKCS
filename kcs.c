@@ -47,10 +47,10 @@ size_t fbytesleft(FILE *fp) {
 
 void wavFree(WavFile *wavFile) {
     if (wavFile != NULL) {
-        free(wavFile);
         if (wavFile->data.data != NULL) {
             free(wavFile->data.data);
         }
+        free(wavFile);
     }
 }
 
@@ -125,7 +125,7 @@ WavFile *wavLoadFile(FILE *file) {
         size_t bytes_left = fbytesleft(file);
         if (chunkID[0] != 'd' || chunkID[1] != 'a' || chunkID[2] != 't' || chunkID[3] != 'a') {
             if (size > bytes_left) {
-                printf("WAV Read Error: File says there are %lld bytes left but the file only has %lld bytes left.\n", size, bytes_left);
+                printf("WAV Read Error: File says there are %d bytes left but the file only has %lld bytes left.\n", size, bytes_left);
                 wavFree(wavFile);
                 return NULL;
             }
@@ -434,7 +434,7 @@ DecodedKCS KCS_decode(
             for (uint16_t i = 0; i < start_bits; i++) {
                 bool start_bit = get_bit(wavFile, cycles_per_bit, &frameIndex, bpf_high, bpf_low);
                 if (start_bit) {
-                    printf("Start bit was 1 at frame %d, reached end of input.\n", frameIndex);
+                    printf("Start bit was 1 at frame %lld, reached end of input.\n", frameIndex);
                     complete = true;
                     break;
                 }
@@ -505,7 +505,7 @@ DecodedKCS KCS_decode(
 const uint8_t CYCLE_SHAPE_LONG[18] = {155,193,217,232,242,249,252,255,160,100,62,38,23,13,6,3,0,95};
 const uint8_t CYCLE_SHAPE_SHORT[9] = {157,220,245,255,151,85,43,17,0};
 
-void write_cycle(WavFile *wavFile, uint64_t *frameIndex, bool value, double intensity) {
+void write_cycle(WavFile *wavFile, uint64_t *frameIndex, bool value) {
     if (value) {
         for (int i = 0; i < 9; i++) {
             wavSetFrame(wavFile, *frameIndex, CYCLE_SHAPE_SHORT[i]);
@@ -521,7 +521,7 @@ void write_cycle(WavFile *wavFile, uint64_t *frameIndex, bool value, double inte
 
 void write_bit(WavFile *wavFile, uint16_t cycles_per_bit, uint64_t *frameIndex, bool value) {
     for (int i = 0; i < (value ? (cycles_per_bit * 2) : cycles_per_bit); i++) {
-        write_cycle(wavFile, frameIndex, value, 1.0);
+        write_cycle(wavFile, frameIndex, value);
     }
 }
 
@@ -557,7 +557,7 @@ WavFile* KCS_encode(
     // leader
     if (leader > 0) {
         while (frameIndex < wavFile->fmt.sampleRate * (uint32_t)leader) {
-            write_cycle(wavFile, &frameIndex, 1, 0.5);
+            write_cycle(wavFile, &frameIndex, 1);
         }
     }
 
@@ -594,7 +594,7 @@ WavFile* KCS_encode(
     if (leader > 0) {
         uint64_t begin = frameIndex;
         while (frameIndex - begin < wavFile->fmt.sampleRate * (uint32_t)leader) {
-            write_cycle(wavFile, &frameIndex, 1, 0.5);
+            write_cycle(wavFile, &frameIndex, 1);
         }
     }
 
@@ -656,9 +656,9 @@ int cmdDecode(KCS_Config config, char * *infile, char * *outfile) {
         fclose(f);
     }
 
-    printf("%d bytes decoded", buf.size);
+    printf("%lld bytes decoded", buf.size);
     if (config.parity_mode != PARITY_NONE) {
-        printf(", %d parity errors.", decodedKCS.parity_errors);
+        printf(", %lld parity errors.", decodedKCS.parity_errors);
     }
     printf("\ndone in %.3fs\n", (double)(end - start) / CLOCKS_PER_SEC);
 
@@ -694,7 +694,7 @@ int cmdEncode(KCS_Config config, char * *infile, char * *outfile) {
     wavWriteFile(wavFile, f);
     fclose(f);
 
-    printf("%d bytes encoded", buf.size);
+    printf("%lld bytes encoded", buf.size);
     printf("\ndone in %.3fs\n", (double)(end - start) / CLOCKS_PER_SEC);
 
     free(buf.data);
@@ -703,7 +703,7 @@ int cmdEncode(KCS_Config config, char * *infile, char * *outfile) {
     return EXIT_SUCCESS;
 }
 
-const char *info = "KCS Version 0.2  04-Apr-2023\n"
+const char *info = "KCS Version 0.2 04-Apr-2023\n"
 "Use: KCS [options] infile [outfile]\n\n"
 "-Bn baud  1=600 2=1200   -O  odd parity\n"
 "-Ln leader (sec)         -E  even parity\n"
@@ -719,18 +719,18 @@ bool prefix(const char *pre, const char *str)
     return strncmp(pre, str, strlen(pre)) == 0;
 }
 
-int getOptions(int argc, const char *const argv[], KCS_Config *config, char * *infile, char * *outfile) {
+int getOptions(int argc, char **argv, KCS_Config *config, char **infile, char **outfile) {
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-C") == 0) config->consoleOutput = true;
-        else if (strcmp(argv[i], "-M") == 0) config->makeWaveFile = true;
-        else if (strcmp(argv[i], "-O") == 0) config->parity_mode = PARITY_ODD;
-        else if (strcmp(argv[i], "-E") == 0) config->parity_mode = PARITY_EVEN;
-        else if (strcmp(argv[i], "-D") == 0) config->data_bits = 7;
-        else if (strcmp(argv[i], "-S") == 0) config->stop_bits = 1;
+        if (prefix("-C", argv[i])) config->consoleOutput = true;
+        else if (prefix("-M", argv[i])) config->makeWaveFile = true;
+        else if (prefix("-O", argv[i])) config->parity_mode = PARITY_ODD;
+        else if (prefix("-E", argv[i])) config->parity_mode = PARITY_EVEN;
+        else if (prefix("-D", argv[i])) config->data_bits = 7;
+        else if (prefix("-S", argv[i])) config->stop_bits = 1;
         else if (prefix("-B", argv[i])) {
             int n = atoi(argv[i] + 2);
             if (n != 1 && n != 2) {
-                printf("invalid option ... aborting\n");
+                printf("invalid option - specify -B1 or -B2 ... aborting\n");
                 return EXIT_FAILURE;
             }
 
@@ -761,7 +761,7 @@ int getOptions(int argc, const char *const argv[], KCS_Config *config, char * *i
     return EXIT_SUCCESS;
 }
 
-int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
+int handleOptions(KCS_Config config, char **infile, char **outfile) {
     if (*outfile == NULL) {
         // TODO: generate outfile name based on infile and mode
         *outfile = malloc(strlen(*infile) + 3 + 1);
@@ -787,7 +787,7 @@ int handleOptions(KCS_Config config, char * *infile, char * *outfile) {
     return EXIT_SUCCESS;
 }
 
-int main(int argc, const char *const argv[]) {
+int main(int argc, char **argv) {
     if (argc == 1) {
         printf("%s", info);
         return EXIT_SUCCESS;
